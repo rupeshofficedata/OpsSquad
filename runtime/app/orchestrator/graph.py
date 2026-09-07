@@ -1,0 +1,198 @@
+"""Executes a Flightplan's step graph.
+
+The step graph is stored as JSON (converted from the YAML definitions in
+flightplans/*.yaml). Steps run in dependency order (`needs`); a step with
+`type: approval` pauses the run until an admin approves it via
+POST /api/runs/:id/approve on the BFF, which calls resume_flightplan below.
+`when` expressions are evaluated against a restricted namespace containing
+only `steps` and `inputs` — this is adequate for a trusted, admin-authored
+Flightplan but is not a sandboxed expression language; do not accept
+flightplan definitions from untrusted users without hardening this further.
+"""
+
+import re
+from typing import Any
+
+from app import repo
+from app.config import settings
+from app.orchestrator.executor import run_agent
+from app.security import role_at_least
+
+TEMPLATE_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+class _AttrDict(dict):
+    """A dict that also supports attribute access, so `${inputs.repo}` and
+    `${steps.verify.status}` work against plain JSON objects in expressions."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return _wrap(self[name])
+        except KeyError:
+            raise AttributeError(name) from None
+
+
+def _wrap(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _AttrDict(value)
+    if isinstance(value, list):
+        return [_wrap(v) for v in value]
+    return value
+
+
+def _resolve_templates(value: Any, context: dict[str, Any]) -> Any:
+    if isinstance(value, str):
+        match = TEMPLATE_RE.fullmatch(value.strip())
+        if match:
+            return _eval_expr(match.group(1), context)
+        return TEMPLATE_RE.sub(lambda m: str(_eval_expr(m.group(1), context)), value)
+    if isinstance(value, dict):
+        return {k: _resolve_templates(v, context) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_templates(v, context) for v in value]
+    return value
+
+
+def _eval_expr(expr: str, context: dict[str, Any]) -> Any:
+    wrapped = {k: _wrap(v) for k, v in context.items()}
+    try:
+        return eval(expr, {"__builtins__": {}}, wrapped)  # noqa: S307 — restricted namespace, admin-authored plans only
+    except Exception:
+        return None
+
+
+def _topo_order(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {s["id"]: s for s in steps}
+    visited: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+
+    def visit(step_id: str) -> None:
+        if step_id in visited:
+            return
+        visited.add(step_id)
+        step = by_id[step_id]
+        for dep in step.get("needs", []):
+            visit(dep)
+        ordered.append(step)
+
+    for s in steps:
+        visit(s["id"])
+    return ordered
+
+
+async def _rebuild_context(run_id: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    """Reconstructs step outputs from persisted run_steps so a resumed run
+    (after an approval gate) can still resolve ${steps.x.*} templates."""
+    context: dict[str, Any] = {"inputs": inputs, "steps": {}}
+    for row in await repo.list_run_steps(run_id):
+        if not row["step_id"]:
+            continue
+        context["steps"][row["step_id"]] = {"status": row["status"], **(row["output"] or {})}
+    return context
+
+
+async def execute_flightplan(
+    run_id: str, flightplan: dict[str, Any], inputs: dict[str, Any], user_role: str
+) -> str:
+    """Runs steps from the beginning. Returns 'success' | 'failed' | 'awaiting_approval'."""
+    context: dict[str, Any] = {"inputs": inputs, "steps": {}}
+    return await _run_steps(run_id, flightplan, context, start_at=0, user_role=user_role)
+
+
+async def resume_flightplan(
+    run_id: str, flightplan: dict[str, Any], inputs: dict[str, Any], user_role: str
+) -> str:
+    """Resumes a run that's sitting at 'awaiting_approval', continuing past
+    the approval step it paused on."""
+    context = await _rebuild_context(run_id, inputs)
+    resume_from = await repo.count_run_steps(run_id) + 1  # +1 skips the approval step itself
+    return await _run_steps(run_id, flightplan, context, start_at=resume_from, user_role=user_role)
+
+
+async def _run_steps(
+    run_id: str, flightplan: dict[str, Any], context: dict[str, Any], start_at: int, user_role: str
+) -> str:
+    steps = _topo_order(flightplan["definition"]["steps"])
+    # Derived from `context` (not a fresh False) so a resume after an
+    # approval gate still remembers a failure from *before* the pause —
+    # execute_flightplan starts with an empty context so this is False
+    # there; resume_flightplan's rebuilt context carries prior statuses.
+    any_step_failed = any(s.get("status") == "failed" for s in context["steps"].values())
+
+    for order, step in enumerate(steps):
+        if order < start_at:
+            continue
+
+        if step.get("when") is not None:
+            should_run = _eval_expr(step["when"].strip("${}"), context)
+            if not should_run:
+                context["steps"][step["id"]] = {"status": "skipped"}
+                await repo.add_run_step(
+                    run_id, order, step.get("agent", step["id"]), "skipped", step_id=step["id"]
+                )
+                continue
+
+        if step.get("type") == "approval":
+            await repo.finish_run(run_id, "awaiting_approval")
+            return "awaiting_approval"
+
+        agent_slug = step["agent"]
+        agent = await repo.get_agent(agent_slug)
+        if agent is None:
+            await repo.add_run_step(run_id, order, agent_slug, "failed", step_id=step["id"], reasoning="agent not found")
+            await repo.finish_run(run_id, "failed")
+            return "failed"
+
+        if not role_at_least(user_role, agent["min_role"]):
+            await repo.add_run_step(
+                run_id, order, agent_slug, "failed", step_id=step["id"],
+                reasoning=f"triggering user's role '{user_role}' cannot run agent '{agent_slug}' (needs >= '{agent['min_role']}')",
+            )
+            await repo.finish_run(run_id, "failed")
+            return "failed"
+
+        if agent["is_mutating"] and not settings.mutating_agents_enabled:
+            await repo.add_run_step(
+                run_id, order, agent_slug, "failed", step_id=step["id"],
+                reasoning="kill switch: mutating agents disabled",
+            )
+            await repo.finish_run(run_id, "failed")
+            return "failed"
+
+        # `with` supplies the agent's normal params; `policy` and
+        # `guardrails` are sibling step keys (not user input) that
+        # security_scan.py and remediate.py read to decide pass/fail —
+        # merged in here so both are visible on ctx.params.
+        params = _resolve_templates(step.get("with", {}), context)
+        if "policy" in step:
+            params["policy"] = _resolve_templates(step["policy"], context)
+        if "guardrails" in step:
+            params["guardrails"] = _resolve_templates(step["guardrails"], context)
+
+        result = await run_agent(agent, params)
+        step_status = result["status"]
+
+        await repo.add_run_step(
+            run_id, order, agent_slug, step_status, step_id=step["id"],
+            input_data=params, output_data=result["output"],
+            reasoning=result["reasoning"], tool_calls=result["tool_calls"],
+            duration_ms=result["duration_ms"],
+        )
+        context["steps"][step["id"]] = {"status": step_status, **result["output"]}
+
+        if step_status == "failed":
+            any_step_failed = True
+
+        # A `policy.block_on` breach means "stop the pipeline" by definition,
+        # even on a step that didn't separately declare fail_fast.
+        stops_pipeline = step.get("fail_fast") or step.get("policy", {}).get("block_on")
+        if step_status == "failed" and stops_pipeline:
+            await repo.finish_run(run_id, "failed")
+            return "failed"
+
+    # A step can fail without stopping the pipeline (no fail_fast/block_on),
+    # e.g. `verify` failing but `rollback` handling it — that's still a
+    # failed run overall, not a clean success, even though nothing aborted.
+    final_status = "failed" if any_step_failed else "success"
+    await repo.finish_run(run_id, final_status)
+    return final_status

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opssquad-config
+  namespace: opssquad
+data:
+  NODE_ENV: "production"
+  LOG_LEVEL: "info"
+  POSTGRES_USER: "opssquad"
+  POSTGRES_DB: "opssquad"
+  REDIS_URL: "redis://redis:6379"
+  JWT_ACCESS_TTL: "15m"
+  JWT_REFRESH_TTL: "7d"
+  INTENT_ROUTER_MODEL: "claude-haiku-4-5-20251001"
+  AGENT_MODEL: "claude-sonnet-5"
+  BFF_PORT: "4000"
+  RUNTIME_URL: "http://runtime:8000"
+  CONTROL_URL: "http://control:6001"
+  FRONTEND_ORIGIN: "http://localhost:5173"
+  MUTATING_AGENTS_ENABLED: "true"

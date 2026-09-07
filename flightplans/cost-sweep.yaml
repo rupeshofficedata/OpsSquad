@@ -1,0 +1,17 @@
+# flightplans/cost-sweep.yaml
+slug: cost-sweep
+name: Nightly Cost Sweep
+env: all
+trigger:
+  type: schedule
+  cron: "0 2 * * *"
+
+steps:
+  - id: scan
+    agent: cost-analyzer
+    with: { min_idle_days: 30 }
+
+  - id: propose
+    agent: terraform-plan
+    needs: [scan]
+    with: { mode: rightsizing, open_pr: true }   # PR only, never apply

@@ -1,0 +1,54 @@
+# flightplans/ship-to-prod.yaml
+slug: ship-to-prod
+name: Ship to Production
+env: prod
+description: Full path from merged PR to verified production release.
+
+inputs:
+  repo:   { type: string, required: true }
+  commit: { type: string, required: true }
+
+steps:
+  - id: review
+    agent: code-review
+    with: { repo: "${inputs.repo}", commit: "${inputs.commit}" }
+    fail_fast: true                # a committed secret should stop the pipeline immediately
+
+  - id: test
+    agent: test-runner
+    needs: [review]
+    with: { commit: "${inputs.commit}" }
+    fail_fast: true                # stop the whole plan if tests fail
+
+  - id: build
+    agent: build
+    needs: [test]
+    with: { tag: "${inputs.commit[:7]}" }
+
+  - id: scan
+    agent: security-scan
+    needs: [build]
+    with: { tag: "${inputs.commit[:7]}" }
+    policy:
+      block_on: [CRITICAL]         # HIGH is warn-only
+
+  - id: approval                   # 🔒 human gate before prod
+    type: approval
+    needs: [scan]
+    approvers: [admin]
+    timeout: 2h
+
+  - id: deploy
+    agent: deploy
+    needs: [approval]
+    with: { chart: "charts/${inputs.repo}", namespace: prod }
+
+  - id: verify
+    agent: verify
+    needs: [deploy]
+    with: { commit: "${inputs.commit}", window: 5m, error_rate_threshold: 0.02 }
+
+  - id: rollback                   # only fires if verify fails
+    agent: rollback
+    needs: [verify]
+    when: "${steps.verify.status == 'failed'}"

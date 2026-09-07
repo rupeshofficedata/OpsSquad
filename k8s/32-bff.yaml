@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff
+  namespace: opssquad
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bff }
+  template:
+    metadata:
+      labels: { app: bff }
+    spec:
+      containers:
+        - name: bff
+          image: opssquad/bff:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4000
+          envFrom:
+            - configMapRef: { name: opssquad-config }
+            - secretRef: { name: opssquad-secrets }
+          readinessProbe:
+            httpGet: { path: /health, port: 4000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 4000 }
+            initialDelaySeconds: 15
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff
+  namespace: opssquad
+spec:
+  selector: { app: bff }
+  ports:
+    - port: 4000
+      targetPort: 4000

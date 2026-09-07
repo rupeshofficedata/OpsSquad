@@ -1,0 +1,45 @@
+# flightplans/incident-response.yaml
+slug: incident-response
+name: Incident Response
+env: prod
+trigger:
+  type: webhook
+  source: alertmanager
+
+steps:
+  - id: triage
+    agent: incident-triage
+    with: { alert: "${inputs.alert}" }
+
+  - id: diagnose
+    agent: diagnose
+    needs: [triage]
+    with: { lookback: 30m, alertname: "${steps.triage.alertname}" }
+
+  - id: remediate
+    agent: remediate
+    needs: [diagnose]
+    when: "${steps.triage.severity in ['P1','P2']}"
+    with:
+      action: "${steps.diagnose.recommended_action}"
+      target_replicas: "${steps.diagnose.suggested_replicas}"
+    guardrails:
+      allowed_actions: [restart_pod, scale_hpa, rollback_release]
+      max_replicas: 10              # agent cannot scale beyond this
+
+  - id: notify
+    agent: notify
+    needs: [remediate]
+    with:
+      channel: "#incidents"
+      severity: "${steps.triage.severity}"
+      remediation_action: "${steps.remediate.action}"
+
+  - id: postmortem
+    agent: postmortem
+    needs: [notify]
+    with:
+      format: markdown
+      assign_to: on_call
+      severity: "${steps.triage.severity}"
+      remediation_action: "${steps.remediate.action}"
