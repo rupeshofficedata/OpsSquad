@@ -248,10 +248,12 @@ A **Flightplan** is a declarative YAML graph. See [`flightplans/`](flightplans/)
 opssquad/
 ├── frontend/                    # React + Vite
 ├── bff/                         # Node.js + Express
-├── runtime/                     # FastAPI — agents live here
+├── runtime/                     # FastAPI — orchestrator + tools
+│   └── app/agents/              # one module per agent (real pass/fail logic, no LLM needed)
 ├── control/                     # Flask — admin & webhooks
 ├── db/                          # migrations + seed.sql
 ├── flightplans/                 # YAML definitions
+├── k8s/                         # kind cluster manifests + bootstrap.sh
 ├── docker-compose.yml
 └── .env.example
 ```
@@ -286,6 +288,14 @@ open http://localhost:5173
 | Flask | 6001 |
 | PostgreSQL | 5432 |
 | Redis | 6379 |
+
+## ☸️ Running on Kubernetes (kind)
+
+```bash
+./k8s/bootstrap.sh
+```
+
+Builds images, creates/reuses a `kind` cluster named `opssquad`, applies manifests, runs the migration Job, and port-forwards the frontend (`:5173`) and BFF (`:4000`) to localhost. Safe to re-run. Details in [`k8s/`](k8s/).
 
 ---
 
