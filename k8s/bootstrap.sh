@@ -51,12 +51,23 @@ k apply -f "$K8S_DIR/00-namespace.yaml"
 k apply -f "$K8S_DIR/01-configmap.yaml"
 k apply -f "$K8S_DIR/02-secret.yaml"
 k apply -f "$K8S_DIR/05-rbac.yaml"
+k apply -f "$K8S_DIR/06-vault.yaml"
 k apply -f "$K8S_DIR/10-postgres.yaml"
 k apply -f "$K8S_DIR/11-redis.yaml"
 
-log "Waiting for postgres and redis"
+log "Waiting for postgres, redis, and vault"
 k -n "$NAMESPACE" rollout status deployment/postgres --timeout=120s
 k -n "$NAMESPACE" rollout status deployment/redis --timeout=60s
+k -n "$NAMESPACE" rollout status deployment/vault --timeout=60s
+
+log "Configuring Vault (Kubernetes auth, policies, secrets)"
+k -n "$NAMESPACE" delete job opssquad-vault-init --ignore-not-found
+k apply -f "$K8S_DIR/07-vault-init-job.yaml"
+if ! k -n "$NAMESPACE" wait --for=condition=complete job/opssquad-vault-init --timeout=60s; then
+  log "Vault init job failed — logs:"
+  k -n "$NAMESPACE" logs job/opssquad-vault-init
+  exit 1
+fi
 
 log "Syncing db/migrations + db/seed.sql into a ConfigMap and running the migration Job"
 k -n "$NAMESPACE" create configmap opssquad-sql \

@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { config } from "../config.js";
 import { pool } from "../db.js";
+import { redis } from "../redis.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { requireRole } from "../middleware/requireRole.js";
@@ -38,6 +40,20 @@ router.post("/:id/approve", requireAuth, requireRole("admin"), asyncHandler(asyn
   });
   const body = await resp.json();
   res.status(resp.status).json(body);
+}));
+
+// Mints a short-lived, single-use ticket for the WS run-stream endpoint,
+// instead of that endpoint reading the real (15-min) access token off the
+// URL — which leaks into access/proxy logs. The ticket is only good for
+// opening one connection to this one run, within 30s.
+router.post("/:id/stream-ticket", requireAuth, asyncHandler(async (req, res) => {
+  const ticket = randomUUID();
+  await redis.set(
+    `ws-ticket:${ticket}`,
+    JSON.stringify({ userId: req.user.sub, runId: req.params.id }),
+    { EX: 30 }
+  );
+  res.json({ ticket });
 }));
 
 router.post("/:id/abort", requireAuth, requireRole("dev"), asyncHandler(async (req, res) => {

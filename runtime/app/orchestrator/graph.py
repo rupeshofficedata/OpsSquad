@@ -4,10 +4,9 @@ The step graph is stored as JSON (converted from the YAML definitions in
 flightplans/*.yaml). Steps run in dependency order (`needs`); a step with
 `type: approval` pauses the run until an admin approves it via
 POST /api/runs/:id/approve on the BFF, which calls resume_flightplan below.
-`when` expressions are evaluated against a restricted namespace containing
-only `steps` and `inputs` — this is adequate for a trusted, admin-authored
-Flightplan but is not a sandboxed expression language; do not accept
-flightplan definitions from untrusted users without hardening this further.
+`when`/`policy` expressions run through app.orchestrator.safe_eval — a
+real restricted evaluator (AST allowlist, attribute access is dict-key
+lookup, never getattr()), not eval(). See that module's docstring for why.
 """
 
 import re
@@ -16,28 +15,10 @@ from typing import Any
 from app import repo
 from app.config import settings
 from app.orchestrator.executor import run_agent
+from app.orchestrator.safe_eval import evaluate as safe_evaluate
 from app.security import role_at_least
 
 TEMPLATE_RE = re.compile(r"\$\{([^}]+)\}")
-
-
-class _AttrDict(dict):
-    """A dict that also supports attribute access, so `${inputs.repo}` and
-    `${steps.verify.status}` work against plain JSON objects in expressions."""
-
-    def __getattr__(self, name: str) -> Any:
-        try:
-            return _wrap(self[name])
-        except KeyError:
-            raise AttributeError(name) from None
-
-
-def _wrap(value: Any) -> Any:
-    if isinstance(value, dict):
-        return _AttrDict(value)
-    if isinstance(value, list):
-        return [_wrap(v) for v in value]
-    return value
 
 
 def _resolve_templates(value: Any, context: dict[str, Any]) -> Any:
@@ -54,9 +35,8 @@ def _resolve_templates(value: Any, context: dict[str, Any]) -> Any:
 
 
 def _eval_expr(expr: str, context: dict[str, Any]) -> Any:
-    wrapped = {k: _wrap(v) for k, v in context.items()}
     try:
-        return eval(expr, {"__builtins__": {}}, wrapped)  # noqa: S307 — restricted namespace, admin-authored plans only
+        return safe_evaluate(expr, context)
     except Exception:
         return None
 

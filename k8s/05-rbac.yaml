@@ -34,3 +34,13 @@ roleRef:
   kind: Role
   name: runtime-agent
   apiGroup: rbac.authorization.k8s.io
+---
+# No k8s Role needed — bff never calls kubectl. It exists so Vault's
+# Kubernetes auth method (k8s/07-vault-init-job.yaml) can bind a Vault
+# policy to this ServiceAccount by name, so bff authenticates to Vault
+# with its own projected token instead of holding a static credential.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bff
+  namespace: opssquad

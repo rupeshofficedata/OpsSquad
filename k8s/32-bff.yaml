@@ -11,12 +11,16 @@ spec:
     metadata:
       labels: { app: bff }
     spec:
+      serviceAccountName: bff
       containers:
         - name: bff
           image: opssquad/bff:local
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 4000
+          env:
+            - name: VAULT_ROLE
+              value: "opssquad-bff"
           envFrom:
             - configMapRef: { name: opssquad-config }
             - secretRef: { name: opssquad-secrets }

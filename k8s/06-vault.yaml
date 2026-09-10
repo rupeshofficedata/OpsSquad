@@ -1,0 +1,98 @@
+# Real, self-hosted Vault for runtime/bff secrets — dev mode (in-memory,
+# auto-unsealed) is a deliberate scope choice for this local kind cluster,
+# same "real integration, safe/self-contained target" pattern as
+# terraform-demo (local provider) and trivy (scans its own container).
+# A real deployment needs a real storage backend + auto-unseal or HCP Vault.
+#
+# The root token and the values to seed into Vault (07-vault-init-job.yaml
+# writes these INTO Vault, then never reads them from here again) live in
+# their own Secret, referenced only by explicit secretKeyRef — never via
+# runtime's or bff's blanket `envFrom: secretRef: opssquad-secrets`. If
+# they were in that shared Secret, both pods would get the Vault root
+# credential (and every other app secret) injected as a plain env var,
+# defeating the entire point of authenticating via their own
+# Kubernetes-auth ServiceAccount tokens instead of holding a static
+# credential.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: opssquad-vault-seed
+  namespace: opssquad
+type: Opaque
+stringData:
+  VAULT_ROOT_TOKEN: "change-me-vault-dev-root-token"
+  JWT_SECRET: "kind-dev-cluster-jwt-secret-not-for-real-use"
+  ANTHROPIC_API_KEY: ""
+  OPENAI_API_KEY: ""
+  GITHUB_WEBHOOK_SECRET: ""
+  ALERTMANAGER_WEBHOOK_TOKEN: "change-me-alertmanager-token"
+---
+# Vault's Kubernetes auth method validates a login JWT by calling the
+# TokenReview API — that requires Vault's own pod identity to hold the
+# built-in system:auth-delegator ClusterRole (standard, documented
+# requirement for Vault-on-Kubernetes; TokenReview is cluster-scoped, so
+# this can't be a namespaced Role). Without it every login 403s.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: opssquad
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opssquad-vault-auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: vault
+    namespace: opssquad
+roleRef:
+  kind: ClusterRole
+  name: system:auth-delegator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: opssquad
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vault }
+  template:
+    metadata:
+      labels: { app: vault }
+    spec:
+      serviceAccountName: vault
+      containers:
+        - name: vault
+          image: hashicorp/vault:1.18
+          args:
+            - server
+            - -dev
+            - -dev-listen-address=0.0.0.0:8200
+          env:
+            - name: VAULT_DEV_ROOT_TOKEN_ID
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: VAULT_ROOT_TOKEN } }
+          ports:
+            - containerPort: 8200
+          readinessProbe:
+            httpGet: { path: /v1/sys/health, port: 8200 }
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: { path: /v1/sys/health, port: 8200 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: opssquad
+spec:
+  selector: { app: vault }
+  ports:
+    - port: 8200
+      targetPort: 8200

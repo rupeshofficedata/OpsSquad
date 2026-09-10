@@ -1,0 +1,64 @@
+# One-shot Vault configuration: enable KV v2 + Kubernetes auth, write the
+# two least-privilege policies and their role bindings, seed the actual
+# secret values. Mirrors 20-migration-job.yaml's pattern. Enable steps are
+# `|| true` guarded so re-running bootstrap.sh (which deletes+recreates
+# this Job every time) stays safe against "already enabled" errors.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: opssquad-vault-init
+  namespace: opssquad
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: vault-init
+          image: hashicorp/vault:1.18
+          env:
+            - name: VAULT_ADDR
+              value: "http://vault:8200"
+            - name: VAULT_TOKEN
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: VAULT_ROOT_TOKEN } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: JWT_SECRET } }
+            - name: ANTHROPIC_API_KEY
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: ANTHROPIC_API_KEY } }
+            - name: OPENAI_API_KEY
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: OPENAI_API_KEY } }
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: GITHUB_WEBHOOK_SECRET } }
+            - name: ALERTMANAGER_WEBHOOK_TOKEN
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: ALERTMANAGER_WEBHOOK_TOKEN } }
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              until vault status >/dev/null 2>&1; do sleep 1; done
+
+              vault secrets enable -path=secret kv-v2 || true
+              vault auth enable kubernetes || true
+              vault write auth/kubernetes/config kubernetes_host=https://kubernetes.default.svc
+
+              printf 'path "secret/data/opssquad/jwt"     { capabilities = ["read"] }\npath "secret/data/opssquad/llm"      { capabilities = ["read"] }\npath "secret/data/opssquad/webhooks" { capabilities = ["read"] }\n' | vault policy write opssquad-runtime -
+              printf 'path "secret/data/opssquad/jwt" { capabilities = ["read"] }\n' | vault policy write opssquad-bff -
+
+              vault write auth/kubernetes/role/opssquad-runtime \
+                bound_service_account_names=runtime \
+                bound_service_account_namespaces=opssquad \
+                policies=opssquad-runtime \
+                ttl=1h
+
+              vault write auth/kubernetes/role/opssquad-bff \
+                bound_service_account_names=bff \
+                bound_service_account_namespaces=opssquad \
+                policies=opssquad-bff \
+                ttl=1h
+
+              vault kv put secret/opssquad/jwt secret="$JWT_SECRET"
+              vault kv put secret/opssquad/llm anthropic_api_key="$ANTHROPIC_API_KEY" openai_api_key="$OPENAI_API_KEY"
+              vault kv put secret/opssquad/webhooks github_secret="$GITHUB_WEBHOOK_SECRET" alertmanager_token="$ALERTMANAGER_WEBHOOK_TOKEN"
+
+              echo "vault configured"

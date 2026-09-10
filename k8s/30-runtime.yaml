@@ -18,6 +18,9 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
+          env:
+            - name: VAULT_ROLE
+              value: "opssquad-runtime"
           envFrom:
             - configMapRef: { name: opssquad-config }
             - secretRef: { name: opssquad-secrets }

@@ -1,3 +1,5 @@
+from typing import Literal
+
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -7,16 +9,18 @@ from app.security import User, require_role
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+Role = Literal["admin", "dev", "viewer"]
+
 
 class CreateUserRequest(BaseModel):
     email: str
     password: str
     full_name: str | None = None
-    role: str = "viewer"
+    role: Role = "viewer"
 
 
 class UpdateRoleRequest(BaseModel):
-    role: str
+    role: Role
 
 
 @router.get("/users")
@@ -32,8 +36,6 @@ async def create_user(req: CreateUserRequest, _user: User = Depends(require_role
 
 @router.patch("/users/{user_id}/role")
 async def update_role(user_id: str, req: UpdateRoleRequest, _user: User = Depends(require_role("admin"))):
-    if req.role not in ("admin", "dev", "viewer"):
-        raise HTTPException(400, "invalid role")
     updated = await repo.update_user_role(user_id, req.role)
     if updated is None:
         raise HTTPException(404, "user not found")

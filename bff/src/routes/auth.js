@@ -1,29 +1,25 @@
 import bcrypt from "bcryptjs";
+import rateLimit from "express-rate-limit";
 import { Router } from "express";
-import jwt from "jsonwebtoken";
-import { config } from "../config.js";
 import { pool } from "../db.js";
 import { redis } from "../redis.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth } from "../middleware/requireAuth.js";
+import { signAccessToken, signRefreshToken, verifyToken } from "../jwt.js";
 
 export const router = Router();
 
-function signAccessToken(user) {
-  return jwt.sign(
-    { sub: user.id, email: user.email, role: user.role },
-    config.jwtSecret,
-    { expiresIn: config.jwtAccessTtl }
-  );
-}
+// Stricter than the app-wide 120/min — brute-forcing logins specifically
+// is the actual risk the global limit doesn't address.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many login attempts, try again later" },
+});
 
-function signRefreshToken(user) {
-  return jwt.sign({ sub: user.id, type: "refresh" }, config.jwtSecret, {
-    expiresIn: config.jwtRefreshTtl,
-  });
-}
-
-router.post("/login", asyncHandler(async (req, res) => {
+router.post("/login", loginLimiter, asyncHandler(async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: "email and password are required" });
@@ -68,7 +64,7 @@ router.post("/refresh", asyncHandler(async (req, res) => {
 
   let payload;
   try {
-    payload = jwt.verify(token, config.jwtSecret);
+    payload = verifyToken(token);
   } catch {
     return res.status(401).json({ error: "Invalid refresh token" });
   }

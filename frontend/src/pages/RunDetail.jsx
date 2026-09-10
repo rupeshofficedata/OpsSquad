@@ -11,21 +11,35 @@ export default function RunDetail() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    const ws = new WebSocket(runStreamUrl(id));
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.error) return setError(data.error);
-      setRun(data.run);
-      setSteps(data.steps);
-    };
-    ws.onerror = () => setError("Live stream disconnected — falling back to a one-time fetch.");
+    let ws;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const url = await runStreamUrl(id); // mints a fresh ticket, then opens the socket
+        if (cancelled) return;
+        ws = new WebSocket(url);
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          if (data.error) return setError(data.error);
+          setRun(data.run);
+          setSteps(data.steps);
+        };
+        ws.onerror = () => setError("Live stream disconnected — falling back to a one-time fetch.");
+      } catch (e) {
+        setError(e.message);
+      }
+    })();
 
     api.getRun(id).then((r) => {
       setRun(r);
       setSteps(r.steps);
     }).catch((e) => setError(e.message));
 
-    return () => ws.close();
+    return () => {
+      cancelled = true;
+      ws?.close();
+    };
   }, [id]);
 
   async function handleApprove() {

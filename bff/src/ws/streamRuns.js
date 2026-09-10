@@ -1,7 +1,6 @@
-import jwt from "jsonwebtoken";
 import { WebSocketServer } from "ws";
-import { config } from "../config.js";
 import { pool } from "../db.js";
+import { redis } from "../redis.js";
 
 const TERMINAL_STATUSES = new Set(["success", "failed", "aborted"]);
 const POLL_INTERVAL_MS = 2000;
@@ -13,18 +12,26 @@ const POLL_INTERVAL_MS = 2000;
 export function attachRunStream(server) {
   const wss = new WebSocketServer({ noServer: true });
 
-  server.on("upgrade", (req, socket, head) => {
+  server.on("upgrade", async (req, socket, head) => {
     const url = new URL(req.url, "http://localhost");
     const match = url.pathname.match(/^\/ws\/runs\/([^/]+)$/);
     if (!match) return socket.destroy();
 
-    const token = url.searchParams.get("token");
+    // Single-use ticket (POST /api/runs/:id/stream-ticket), not the real
+    // access token — never something that leaks into logs as a reusable
+    // credential. getDel is atomic: no window where the same ticket could
+    // be read and used twice.
+    const ticket = url.searchParams.get("ticket");
+    if (!ticket) return socket.destroy();
+    const raw = await redis.getDel(`ws-ticket:${ticket}`);
+    if (!raw) return socket.destroy();
+    let payload;
     try {
-      jwt.verify(token, config.jwtSecret);
+      payload = JSON.parse(raw);
     } catch {
-      socket.destroy();
-      return;
+      return socket.destroy();
     }
+    if (payload.runId !== match[1]) return socket.destroy();
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req, match[1]);

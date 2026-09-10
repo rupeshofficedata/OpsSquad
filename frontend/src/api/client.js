@@ -39,13 +39,17 @@ export const api = {
   getRun: (id) => request(`/api/runs/${id}`),
   approveRun: (id) => request(`/api/runs/${id}/approve`, { method: "POST" }),
   abortRun: (id) => request(`/api/runs/${id}/abort`, { method: "POST" }),
+  createRunStreamTicket: (id) => request(`/api/runs/${id}/stream-ticket`, { method: "POST" }),
   listUsers: () => request("/api/admin/users"),
   updateUserRole: (id, role) =>
     request(`/api/admin/users/${id}/role`, { method: "PATCH", body: JSON.stringify({ role }) }),
   auditLog: () => request("/api/admin/audit"),
 };
 
-export function runStreamUrl(runId) {
+// Ticket-based, not the real access token in the URL (which would leak
+// into access/proxy logs) — mint a single-use ticket first, then connect.
+export async function runStreamUrl(runId) {
+  const { ticket } = await api.createRunStreamTicket(runId);
   const base = API_URL.replace(/^http/, "ws");
-  return `${base}/ws/runs/${runId}?token=${encodeURIComponent(accessToken || "")}`;
+  return `${base}/ws/runs/${runId}?ticket=${encodeURIComponent(ticket)}`;
 }

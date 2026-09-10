@@ -2,12 +2,20 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.config import INSECURE_DEFAULT_JWT_SECRET, settings
 from app.db import close_pool, init_pool
 from app.routes import admin, agents, chat, flightplans, runs, webhooks
+from app.vault import load_secrets_from_vault
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await load_secrets_from_vault()  # no-op if VAULT_ADDR isn't set
+    if not settings.jwt_secret or settings.jwt_secret == INSECURE_DEFAULT_JWT_SECRET:
+        raise RuntimeError(
+            "JWT_SECRET is not configured (or still the old public placeholder). "
+            "Set it via .env or Vault — refusing to start with an unsafe default."
+        )
     await init_pool()
     yield
     await close_pool()
