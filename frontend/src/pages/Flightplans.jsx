@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client.js";
+import FlightplanGraph from "../components/FlightplanGraph.jsx";
 
 export default function Flightplans() {
   const [plans, setPlans] = useState([]);
@@ -33,6 +34,9 @@ export default function Flightplans() {
               <span className="rounded bg-slate-800 px-2 py-0.5 text-xs uppercase text-slate-400">{p.env}</span>
             </div>
             <p className="mt-1 text-sm text-slate-400">{p.description}</p>
+            <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/40 p-2 text-slate-300">
+              <FlightplanGraph steps={p.definition?.steps} />
+            </div>
             <div className="mt-4 flex gap-2">
               <button
                 onClick={() => handleExecute(p.slug)}

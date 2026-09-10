@@ -9,7 +9,7 @@ export const router = Router();
 
 router.get("/", requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
-    "SELECT id, slug, name, description, env, created_by, created_at FROM flightplans ORDER BY created_at DESC"
+    "SELECT id, slug, name, description, env, definition, created_by, created_at FROM flightplans ORDER BY created_at DESC"
   );
   res.json(rows);
 }));
