@@ -31,7 +31,15 @@ async def github_webhook(request: Request, x_hub_signature_256: str | None = Hea
 
 
 @router.post("/alertmanager")
-async def alertmanager_webhook(request: Request):
+async def alertmanager_webhook(request: Request, authorization: str | None = Header(default=None)):
+    # Alertmanager sends a Bearer token via webhook_configs.http_config.authorization
+    # (it can't sign the body like GitHub does) — fail closed, always: an
+    # unauthenticated caller must not be able to trigger a privileged,
+    # admin-trust Flightplan run, so there is no "no token configured" bypass.
+    expected = f"Bearer {settings.alertmanager_webhook_token}"
+    if not settings.alertmanager_webhook_token or not authorization or not hmac.compare_digest(authorization, expected):
+        raise HTTPException(401, "missing or invalid bearer token")
+
     payload = await request.json()
 
     flightplan = await repo.get_flightplan("incident-response")

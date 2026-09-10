@@ -236,7 +236,7 @@ A **Flightplan** is a declarative YAML graph — steps run in dependency order, 
 | PATCH | `/admin/users/{id}/role` | Change role |
 | GET | `/admin/audit` | Audit log with filters |
 | POST | `/webhooks/github` | HMAC-verified push/PR events |
-| POST | `/webhooks/alertmanager` | Fires `incident-response` in-process, no auth token needed |
+| POST | `/webhooks/alertmanager` | Bearer-token verified, fires `incident-response` in-process |
 | GET | `/health` | Liveness |
 
 ---
@@ -328,7 +328,7 @@ What's real and tested end-to-end right now:
 - **Chat routing** — a tokenized keyword+stemming matcher (no LLM required) correctly routes a broad set of natural-language prompts to the right agent; swaps to a real Claude tool-use loop when `ANTHROPIC_API_KEY` is set.
 - **15 agent modules** with actual decision logic: `security-scan` really blocks on a CVE severity policy, `test-runner` really fails the run on failing tests, `remediate` really clamps an over-limit scale request against its guardrail, etc. — see [`runtime/app/agents/`](runtime/app/agents/).
 - **Flightplan engine** — dependency-ordered steps, `when` conditions, approval gates, policy/guardrail enforcement, correct final-status computation (a run that failed and auto-rolled-back is reported as failed, not success).
-- **Alertmanager webhook** — actually fires `incident-response` in-process on receipt, no extra configuration needed.
+- **Alertmanager webhook** — fires `incident-response` in-process on receipt, once `ALERTMANAGER_WEBHOOK_TOKEN` is set (it fails closed with no default-allow if unset).
 - **Admin panel** — user CRUD, role changes, and a full audit trail of every mutating action.
 - **Two deploy paths** — `docker compose` for local dev, `k8s/bootstrap.sh` for a local Kubernetes cluster via `kind`.
 

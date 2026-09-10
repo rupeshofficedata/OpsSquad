@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     agent_model: str = "claude-sonnet-5"
     mutating_agents_enabled: bool = True
     github_webhook_secret: str = ""
+    alertmanager_webhook_token: str = ""
 
     class Config:
         env_file = ".env"
