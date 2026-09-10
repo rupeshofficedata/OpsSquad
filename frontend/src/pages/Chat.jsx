@@ -1,12 +1,35 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client.js";
+import { useAuth } from "../auth/AuthContext.jsx";
 
 export default function Chat() {
+  const { user, updateUser } = useAuth();
   const [prompt, setPrompt] = useState("");
   const [env, setEnv] = useState("staging");
   const [history, setHistory] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [modelSaving, setModelSaving] = useState(false);
+  const [modelNameDraft, setModelNameDraft] = useState(user.model_name || "");
+
+  async function handleProviderChange(provider) {
+    setModelSaving(true);
+    try {
+      updateUser(await api.updateModelPreference(provider, provider === "local" ? modelNameDraft : null));
+    } finally {
+      setModelSaving(false);
+    }
+  }
+
+  async function handleModelNameBlur() {
+    if (user.model_provider !== "local") return;
+    setModelSaving(true);
+    try {
+      updateUser(await api.updateModelPreference("local", modelNameDraft || null));
+    } finally {
+      setModelSaving(false);
+    }
+  }
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -29,14 +52,35 @@ export default function Chat() {
     <div className="flex h-full flex-col space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Chat</h1>
-        <select
-          value={env}
-          onChange={(e) => setEnv(e.target.value)}
-          className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
-        >
-          <option value="staging">staging</option>
-          <option value="prod">prod</option>
-        </select>
+        <div className="flex items-center gap-2">
+          <select
+            value={user.model_provider}
+            onChange={(e) => handleProviderChange(e.target.value)}
+            disabled={modelSaving}
+            title="Which model your agent runs execute against"
+            className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
+          >
+            <option value="anthropic">Claude (Anthropic API)</option>
+            <option value="local">Local (llama.cpp)</option>
+          </select>
+          {user.model_provider === "local" && (
+            <input
+              value={modelNameDraft}
+              onChange={(e) => setModelNameDraft(e.target.value)}
+              onBlur={handleModelNameBlur}
+              placeholder="model label, e.g. qwen2.5-coder:7b"
+              className="w-44 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
+            />
+          )}
+          <select
+            value={env}
+            onChange={(e) => setEnv(e.target.value)}
+            className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
+          >
+            <option value="staging">staging</option>
+            <option value="prod">prod</option>
+          </select>
+        </div>
       </div>
 
       <div className="flex-1 space-y-3 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900/40 p-4">

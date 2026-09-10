@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     mutating_agents_enabled: bool = True
     github_webhook_secret: str = ""
     alertmanager_webhook_token: str = ""
+    # OpenAI-compatible endpoint for a self-hosted model, e.g. `llama-server
+    # --port 8080` speaks this API natively. Used only when a user's
+    # model_provider is 'local'.
+    local_llm_base_url: str = "http://localhost:8080/v1"
 
     class Config:
         env_file = ".env"

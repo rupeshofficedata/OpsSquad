@@ -27,6 +27,8 @@ export const api = {
   refresh: () => request("/api/auth/refresh", { method: "POST" }),
   logout: () => request("/api/auth/logout", { method: "POST" }),
   me: () => request("/api/me"),
+  updateModelPreference: (provider, model) =>
+    request("/api/me/model", { method: "PATCH", body: JSON.stringify({ provider, model }) }),
   listAgents: () => request("/api/agents"),
   chat: (prompt, env = "staging") =>
     request("/api/chat", { method: "POST", body: JSON.stringify({ prompt, env }) }),

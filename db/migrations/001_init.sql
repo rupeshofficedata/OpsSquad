@@ -15,7 +15,15 @@ CREATE TABLE users (
     role          user_role NOT NULL DEFAULT 'viewer',
     is_active     BOOLEAN DEFAULT TRUE,
     last_login_at TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    -- Per-user agent-execution model preference. 'anthropic' uses the paid
+    -- API (ANTHROPIC_API_KEY); 'local' targets a self-hosted OpenAI-compatible
+    -- server (e.g. llama-server). model_name is a free-text label — for
+    -- 'anthropic' it overrides AGENT_MODEL, for 'local' it's informational
+    -- only, since a llama.cpp server serves whichever single GGUF it loaded.
+    model_provider VARCHAR(20) NOT NULL DEFAULT 'anthropic'
+        CHECK (model_provider IN ('anthropic', 'local')),
+    model_name     VARCHAR(120)
 );
 
 -- ============================================

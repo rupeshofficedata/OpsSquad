@@ -21,6 +21,16 @@ async def get_user_role(user_id: str) -> str | None:
     return row["role"] if row else None
 
 
+async def get_user_model_preference(user_id: str) -> tuple[str, str | None]:
+    """Returns (provider, model_name). Defaults to ('anthropic', None) for a
+    webhook-triggered run with no human user_id."""
+    if user_id is None:
+        return "anthropic", None
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT model_provider, model_name FROM users WHERE id = $1", user_id)
+    return (row["model_provider"], row["model_name"]) if row else ("anthropic", None)
+
+
 async def get_flightplan(slug: str) -> dict[str, Any] | None:
     pool = get_pool()
     row = await pool.fetchrow("SELECT * FROM flightplans WHERE slug = $1", slug)

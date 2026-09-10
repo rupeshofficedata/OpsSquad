@@ -32,7 +32,8 @@ async def chat(req: ChatRequest, user: User = Depends(current_user)):
         return {"status": "awaiting_approval", "run_id": run_id, "agent": agent["slug"]}
 
     run_id = await repo.create_run(kind="chat", agent_id=agent["id"], triggered_by=user.id, prompt=req.prompt)
-    result = await run_agent(agent, match.params)
+    model_provider, model_name = await repo.get_user_model_preference(user.id)
+    result = await run_agent(agent, match.params, model_provider=model_provider, model_name=model_name)
     await repo.add_run_step(
         run_id, 0, agent["slug"], result["status"],
         input_data=match.params, output_data=result["output"],

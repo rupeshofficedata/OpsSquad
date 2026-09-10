@@ -22,9 +22,13 @@ export function AuthProvider({ children }) {
   }, []);
 
   async function login(email, password) {
-    const { accessToken, user } = await api.login(email, password);
+    const { accessToken } = await api.login(email, password);
     setAccessToken(accessToken);
-    setUser(user);
+    setUser(await api.me()); // full row, incl. model_provider/model_name — login's own response is JWT-claim-sized only
+  }
+
+  function updateUser(patch) {
+    setUser((u) => ({ ...u, ...patch }));
   }
 
   async function logout() {
@@ -34,7 +38,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, updateUser }}>
       {children}
     </AuthContext.Provider>
   );
