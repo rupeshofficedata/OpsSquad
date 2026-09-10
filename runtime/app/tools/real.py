@@ -27,6 +27,32 @@ from app.tools.base import Tool, ToolResult
 
 SUBPROCESS_TIMEOUT = 60.0
 
+_SAFE_ARG_RE = re.compile(r"[a-zA-Z0-9._/-]+")
+
+
+class UnsafeArgError(Exception):
+    pass
+
+
+def _safe_arg(value: str) -> str:
+    """Caller-controlled values (Flightplan `with:` params, direct agent-run
+    request params) land as bare positional argv elements to kubectl/trivy —
+    a value starting with '-' would be parsed as a flag instead of a
+    resource name/path (argument injection), even though there's no shell
+    involved. Reject anything outside a known-safe charset, on top of always
+    passing `--` before the positional (belt and suspenders)."""
+    value = str(value)
+    if not _SAFE_ARG_RE.fullmatch(value) or value.startswith("-"):
+        raise UnsafeArgError(f"unsafe argument: {value!r}")
+    return value
+
+
+def _safe_int(value: Any, *, minimum: int = 0) -> int:
+    n = int(value)
+    if n < minimum:
+        raise UnsafeArgError(f"value must be >= {minimum}: {n}")
+    return n
+
 
 async def _run(*args: str, timeout: float = SUBPROCESS_TIMEOUT) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
@@ -45,8 +71,11 @@ class RealKubectlGet(Tool):
     name = "kubectl.get"
 
     async def run(self, **kwargs: Any) -> ToolResult:
-        target = kwargs.get("k8s_target", settings.kube_read_target)
-        code, out, err = await _run("kubectl", "get", target, "-n", settings.kube_namespace, "-o", "json")
+        try:
+            target = _safe_arg(kwargs.get("k8s_target", settings.kube_read_target))
+        except UnsafeArgError as exc:
+            return ToolResult(ok=False, error=str(exc))
+        code, out, err = await _run("kubectl", "get", "-n", settings.kube_namespace, "-o", "json", "--", target)
         if code != 0:
             return ToolResult(ok=False, error=err[:500])
         obj = json.loads(out)
@@ -61,9 +90,14 @@ class RealKubectlLogs(Tool):
     name = "kubectl.logs"
 
     async def run(self, **kwargs: Any) -> ToolResult:
-        target = kwargs.get("k8s_target", settings.kube_read_target)
-        tail = str(kwargs.get("tail", 200))
-        code, out, err = await _run("kubectl", "logs", target, "-n", settings.kube_namespace, f"--tail={tail}")
+        try:
+            target = _safe_arg(kwargs.get("k8s_target", settings.kube_read_target))
+            tail = _safe_int(kwargs.get("tail", 200), minimum=1)
+        except (UnsafeArgError, ValueError, TypeError) as exc:
+            return ToolResult(ok=False, error=str(exc))
+        code, out, err = await _run(
+            "kubectl", "logs", "-n", settings.kube_namespace, f"--tail={tail}", "--", target
+        )
         if code != 0:
             return ToolResult(ok=False, error=err[:500])
         lines = out.splitlines()
@@ -77,8 +111,13 @@ class RealKubectlRestart(Tool):
     name = "kubectl.restart"
 
     async def run(self, **kwargs: Any) -> ToolResult:
-        target = kwargs.get("k8s_target", settings.kube_mutate_target)
-        code, _, err = await _run("kubectl", "rollout", "restart", target, "-n", settings.kube_namespace)
+        try:
+            target = _safe_arg(kwargs.get("k8s_target", settings.kube_mutate_target))
+        except UnsafeArgError as exc:
+            return ToolResult(ok=False, error=str(exc))
+        code, _, err = await _run(
+            "kubectl", "rollout", "restart", "-n", settings.kube_namespace, "--", target
+        )
         return ToolResult(ok=code == 0, data={"target": target, "real": True} if code == 0 else None,
                            error=None if code == 0 else err[:500])
 
@@ -87,10 +126,13 @@ class RealKubectlScale(Tool):
     name = "kubectl.scale"
 
     async def run(self, **kwargs: Any) -> ToolResult:
-        target = kwargs.get("k8s_target", settings.kube_mutate_target)
-        replicas = kwargs.get("replicas", 1)
+        try:
+            target = _safe_arg(kwargs.get("k8s_target", settings.kube_mutate_target))
+            replicas = _safe_int(kwargs.get("replicas", 1), minimum=0)
+        except (UnsafeArgError, ValueError, TypeError) as exc:
+            return ToolResult(ok=False, error=str(exc))
         code, _, err = await _run(
-            "kubectl", "scale", target, "-n", settings.kube_namespace, f"--replicas={replicas}"
+            "kubectl", "scale", "-n", settings.kube_namespace, f"--replicas={replicas}", "--", target
         )
         return ToolResult(ok=code == 0, data={"target": target, "replicas": replicas, "real": True} if code == 0 else None,
                            error=None if code == 0 else err[:500])
@@ -129,9 +171,12 @@ class RealTrivyScan(Tool):
     name = "trivy.scan"
 
     async def run(self, **kwargs: Any) -> ToolResult:
-        path = kwargs.get("scan_path", settings.trivy_scan_path)
+        try:
+            path = _safe_arg(kwargs.get("scan_path", settings.trivy_scan_path))
+        except UnsafeArgError as exc:
+            return ToolResult(ok=False, error=str(exc))
         code, out, err = await _run(
-            "trivy", "fs", "--format", "json", "--scanners", "vuln", "--quiet", path,
+            "trivy", "fs", "--format", "json", "--scanners", "vuln", "--quiet", "--", path,
             timeout=120.0,
         )
         if code != 0:
