@@ -291,11 +291,30 @@ open http://localhost:5173
 
 ## ☸️ Running on Kubernetes (kind)
 
+Requires `docker`, [`kind`](https://kind.sigs.k8s.io/), and `kubectl` on PATH.
+
 ```bash
+# 1. Bootstrap everything: build images, create/reuse the "opssquad" kind
+#    cluster, apply manifests, run the migration Job, port-forward frontend
+#    (:5173) and BFF (:4000) to localhost.
 ./k8s/bootstrap.sh
+
+# 2. Open the app
+open http://localhost:5173
+#    login: admin@opssquad.dev / Admin@123
 ```
 
-Builds images, creates/reuses a `kind` cluster named `opssquad`, applies manifests, runs the migration Job, and port-forwards the frontend (`:5173`) and BFF (`:4000`) to localhost. Safe to re-run. Details in [`k8s/`](k8s/).
+Idempotent — re-run anytime to pick up code changes (rebuilds images, reloads them into the cluster, restarts rollouts). Uses its own `kubectl --context kind-opssquad`, so it won't touch your current kube context.
+
+```bash
+# Stop the port-forwards
+kill $(cat /tmp/opssquad-k8s-port-forward.pids)
+
+# Tear down the whole cluster
+kind delete cluster --name opssquad
+```
+
+Details and manifest layout in [`k8s/`](k8s/).
 
 ---
 
