@@ -17,6 +17,17 @@ class Settings(BaseSettings):
     # model_provider is 'local'.
     local_llm_base_url: str = "http://localhost:8080/v1"
 
+    # Real tool integrations (kubectl/terraform/trivy) — see app/tools/real.py
+    # for exactly what each targets and why. False keeps every tool
+    # simulated, the safe default the rest of this scaffold was built and
+    # tested against.
+    real_tools_enabled: bool = False
+    kube_namespace: str = "opssquad"
+    kube_read_target: str = "deployment/runtime"
+    kube_mutate_target: str = "deployment/redis"
+    terraform_dir: str = "terraform-demo"
+    trivy_scan_path: str = "/app"
+
     class Config:
         env_file = ".env"
         extra = "ignore"

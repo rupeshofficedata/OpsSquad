@@ -16,6 +16,8 @@ users.model_provider) that decides how their agent runs execute:
   with realistic pass/fail behavior and no LLM at all.
 """
 
+import json
+import re
 import time
 from typing import Any
 
@@ -157,6 +159,24 @@ async def _run_with_claude(
     return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls
 
 
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+
+
+def _extract_content_tool_call(content: str) -> dict[str, Any] | None:
+    """Best-effort parse of a {"name": ..., "arguments": {...}} object a
+    local model wrote into its text response instead of the structured
+    tool_calls field."""
+    text = content.strip()
+    fence = _CODE_FENCE_RE.match(text)
+    if fence:
+        text = fence.group(1)
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) and "name" in obj and "arguments" in obj else None
+
+
 async def _run_with_local_llm(
     agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None
 ) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
@@ -167,8 +187,6 @@ async def _run_with_local_llm(
     string, not a parsed object), and results go back as role="tool"
     messages keyed by tool_call_id rather than role="user" tool_result blocks.
     """
-    import json
-
     tool_defs = [
         {
             "type": "function",
@@ -183,11 +201,16 @@ async def _run_with_local_llm(
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": agent["system_prompt"]},
-        {"role": "user", "content": f"Task parameters: {params}"},
+        # Smaller local models are inconsistent about initiating tool use on
+        # a bare params dump (observed: describing what it would do in
+        # prose instead of calling anything) — Claude doesn't need this
+        # nudge, but it's harmless there too.
+        {"role": "user", "content": f"Task parameters: {params}\n\nUse the available tools to complete this task, then summarize the result."},
     ]
     tool_calls: list[dict[str, Any]] = []
     reasoning_parts: list[str] = []
     final_text = ""
+    seen_call_signatures: set[str] = set()
 
     async with httpx.AsyncClient(timeout=LOCAL_LLM_TIMEOUT) as client:
         for _ in range(MAX_TOOL_ITERATIONS):
@@ -208,8 +231,30 @@ async def _run_with_local_llm(
                 final_text = message["content"]
 
             calls = message.get("tool_calls") or []
+            if not calls and message.get("content"):
+                # Small/local models frequently don't emit the structured
+                # OpenAI tool_calls field even with --jinja and a tools
+                # payload — they write the call as JSON text instead
+                # (observed with Qwen2.5-Coder via llama-server). Fall back
+                # to parsing that out of content rather than treating a
+                # clear tool-call attempt as "no tool calls, we're done."
+                fallback = _extract_content_tool_call(message["content"])
+                if fallback:
+                    calls = [{
+                        "id": "local-fallback-0",
+                        "function": {"name": fallback["name"], "arguments": json.dumps(fallback.get("arguments", {}))},
+                    }]
             if not calls:
                 break
+
+            # Small local models frequently fail to recognize a tool result
+            # as an answer and re-issue the exact same call forever instead
+            # of stopping (observed with Qwen2.5-Coder-7B) — without this,
+            # that burns every iteration on identical repeated no-op calls.
+            signatures = {call["function"]["name"] + "|" + (call["function"].get("arguments") or "") for call in calls}
+            if signatures <= seen_call_signatures:
+                break
+            seen_call_signatures |= signatures
 
             messages.append(message)
             for call in calls:

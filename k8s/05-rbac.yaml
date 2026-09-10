@@ -1,0 +1,36 @@
+# Least-privilege ServiceAccount for the runtime pod's real kubectl tool
+# calls — read pods/logs, read+scale+restart deployments, scoped to the
+# opssquad namespace only. Matches the README's own stated principle:
+# "Every agent gets its own IAM role / kubeconfig — never one god credential."
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: runtime
+  namespace: opssquad
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: runtime-agent
+  namespace: opssquad
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: runtime-agent
+  namespace: opssquad
+subjects:
+  - kind: ServiceAccount
+    name: runtime
+    namespace: opssquad
+roleRef:
+  kind: Role
+  name: runtime-agent
+  apiGroup: rbac.authorization.k8s.io

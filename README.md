@@ -51,7 +51,7 @@ All Python lives in one FastAPI service — an earlier version of this repo spli
 └──────────┬─────────────────────────────────────────────────────┘
            ▼
 ┌────────────────────────┐
-│   Tool Layer (Python)  │   simulated by default — see below
+│   Tool Layer (Python)  │   kubectl/terraform/trivy real, rest simulated
 │ kubectl │ terraform    │
 │ docker  │ trivy        │
 │ git     │ prometheus   │
@@ -325,17 +325,19 @@ Details and manifest layout in [`k8s/`](k8s/).
 What's real and tested end-to-end right now:
 
 - **Auth & RBAC** — full login/refresh/logout cycle, JWT verified independently at both the BFF and FastAPI, per-agent and per-Flightplan-step role checks.
-- **Chat routing** — a tokenized keyword+stemming matcher (no LLM required) correctly routes a broad set of natural-language prompts to the right agent; swaps to a real Claude tool-use loop when `ANTHROPIC_API_KEY` is set.
+- **Chat routing** — a tokenized keyword+stemming matcher (no LLM required) correctly routes a broad set of natural-language prompts to the right agent.
+- **Per-user model choice** — Claude (Anthropic API) or a self-hosted OpenAI-compatible server (`llama-server`, Ollama, vLLM, …), picked per user from the Chat page and threaded through every agent-execution path, including Flightplan resume-after-approval (which runs under the *triggering* user's preference). Tested end-to-end against a real local `llama-server` running Qwen2.5-Coder-7B-Instruct (Q4, CPU-only — this machine's GTX 1080/Pascal isn't supported by the distro's prebuilt CUDA kernels). **Caveat, found by testing, not assumed:** a quantized 7B model's tool-call compliance is inconsistent — reliable for some agents/prompts (`security-scan` → real `trivy.scan`, consistently), silent (describes intent in prose instead of calling a tool) for others (`cost-analyzer`, `terraform-plan` on a bare-params prompt) even after strengthening the tool-use instruction. Claude doesn't have this problem; it's a known characteristic of small local models, not a bug in the adapter — verified by watching real tool_calls arrive (or not) per agent.
+- **Real kubectl/terraform/trivy** — `REAL_TOOLS_ENABLED=true` (the default) swaps these three tool implementations for the real CLIs, genuinely shelling out (see [`runtime/app/tools/real.py`](runtime/app/tools/real.py)). Since there's no real cloud account or "payments-api" deployment to target, they're grounded against safe, self-contained real targets: **kubectl** manages the runtime pod's own least-privilege ServiceAccount (`k8s/05-rbac.yaml`, scoped to the `opssquad` namespace — get/list on pods/pods-log, get/list/patch/update on deployments/deployments-scale), **terraform** runs a real `local`-provider config (`runtime/terraform-demo/`, no cloud creds needed) through a genuine plan→apply→no-changes lifecycle, **trivy** scans the runtime container's own filesystem — real CVE data against the real installed packages (found 6 on the image this was tested against). A production deployment would point these at real infrastructure instead of at OpsSquad itself.
 - **15 agent modules** with actual decision logic: `security-scan` really blocks on a CVE severity policy, `test-runner` really fails the run on failing tests, `remediate` really clamps an over-limit scale request against its guardrail, etc. — see [`runtime/app/agents/`](runtime/app/agents/).
 - **Flightplan engine** — dependency-ordered steps, `when` conditions, approval gates, policy/guardrail enforcement, correct final-status computation (a run that failed and auto-rolled-back is reported as failed, not success).
 - **Alertmanager webhook** — fires `incident-response` in-process on receipt, once `ALERTMANAGER_WEBHOOK_TOKEN` is set (it fails closed with no default-allow if unset).
 - **Admin panel** — user CRUD, role changes, and a full audit trail of every mutating action.
 - **Two deploy paths** — `docker compose` for local dev, `k8s/bootstrap.sh` for a local Kubernetes cluster via `kind`.
 
-What's **simulated**, not real, by default (no `ANTHROPIC_API_KEY` needed to try any of this):
+What's still **simulated**, not real, by default:
 
-- Every tool call (`kubectl.*`, `terraform.*`, `trivy.scan`, `docker.*`, `cloud.cost_explorer`, `prometheus.query`, `slack.post`, …) returns deterministic fake data generated from [`runtime/app/tools/simulate.py`](runtime/app/tools/simulate.py) — seeded by its own input, so the same commit or alert always produces the same result, and different input produces different (sometimes failing) results.
-- No real Kubernetes, cloud provider, registry, or Slack workspace is touched.
+- `docker.*`, `cloud.cost_explorer`, `prometheus.query`, `helm.*`, `argocd.*`, `slack.post`, `pagerduty.read`, `iac.scan`, and a few others return deterministic fake data from [`runtime/app/tools/simulate.py`](runtime/app/tools/simulate.py) — seeded by their own input, so the same commit or alert always produces the same result, and different input produces different (sometimes failing) results.
+- No real cloud provider, container registry, Slack workspace, or PagerDuty account is touched by anything.
 
 ---
 
@@ -343,7 +345,7 @@ What's **simulated**, not real, by default (no `ANTHROPIC_API_KEY` needed to try
 
 Roughly in the order they'd need to happen to move this from a scaffold toward production use:
 
-- **Real tool integrations** — swap each simulated tool in `app/tools/` for an actual `kubectl`/`helm`/`terraform`/`trivy`/cloud-SDK/Slack call. This is the biggest remaining chunk of work; the agent logic that consumes tool output is already written and doesn't need to change shape.
+- **The rest of the real tool integrations** — `docker.*`, `helm.*`, `argocd.*`, a real cloud-cost SDK, Slack, PagerDuty — following the same pattern as kubectl/terraform/trivy in `app/tools/real.py`.
 - **GitHub webhook → real trigger** — `/webhooks/github` currently just acknowledges push/PR events; it doesn't yet map them into a `ship-to-prod` run.
 - **A real job queue** — Flightplan execution runs synchronously inside the HTTP request handler today, so `abort` can only stop a run that hasn't started executing yet (`queued` / `awaiting_approval`), not one mid-flight. A worker queue (Redis is already provisioned for this) would let long-running or scheduled Flightplans run in the background and be genuinely cancellable.
 - **Scheduler for cron-triggered Flightplans** — `cost-sweep.yaml` declares a `schedule.cron`, but nothing currently reads it; it has to be triggered manually or by an external cron job hitting the API.

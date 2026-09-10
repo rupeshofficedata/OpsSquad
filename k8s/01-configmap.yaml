@@ -17,3 +17,8 @@ data:
   RUNTIME_URL: "http://runtime:8000"
   FRONTEND_ORIGIN: "http://localhost:5173"
   MUTATING_AGENTS_ENABLED: "true"
+  REAL_TOOLS_ENABLED: "true"
+  # 172.18.0.1 is the kind Docker network's gateway — reaches the host
+  # machine's llama-server (bound to 0.0.0.0:8080) from inside a pod.
+  # `docker network inspect kind` confirms this per-machine; not portable.
+  LOCAL_LLM_BASE_URL: "http://172.18.0.1:8080/v1"

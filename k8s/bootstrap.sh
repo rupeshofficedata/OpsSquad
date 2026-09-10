@@ -50,6 +50,7 @@ log "Applying namespace, config, secrets, and data stores"
 k apply -f "$K8S_DIR/00-namespace.yaml"
 k apply -f "$K8S_DIR/01-configmap.yaml"
 k apply -f "$K8S_DIR/02-secret.yaml"
+k apply -f "$K8S_DIR/05-rbac.yaml"
 k apply -f "$K8S_DIR/10-postgres.yaml"
 k apply -f "$K8S_DIR/11-redis.yaml"
 

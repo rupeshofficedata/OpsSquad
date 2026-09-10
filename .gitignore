@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 dist/
 .DS_Store
+runtime/terraform-demo/.terraform/
+runtime/terraform-demo/state/
+runtime/terraform-demo/terraform.tfstate*
+core.[0-9]*
