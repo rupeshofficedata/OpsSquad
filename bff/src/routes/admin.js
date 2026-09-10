@@ -9,7 +9,7 @@ export const router = Router();
 router.use(requireAuth, requireRole("admin"));
 
 async function proxy(req, res, path, method = req.method) {
-  const resp = await fetch(`${config.controlUrl}${path}`, {
+  const resp = await fetch(`${config.runtimeUrl}${path}`, {
     method,
     headers: {
       "Content-Type": "application/json",

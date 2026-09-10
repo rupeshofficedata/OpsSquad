@@ -4,37 +4,25 @@
 
 ---
 
-## 📌 Naming Decision
+## 📖 What This Is
 
-| Concept | Name Used | Alternatives Considered |
-|---|---|---|
-| Product | **OpsSquad** | FlowForge, Orkyn, DevSwarm, PipeCrew |
-| A saved multi-agent workflow (your "mission") | **Flightplan** | Runbook, Blueprint, Sortie, Campaign |
-| A single agent execution | **Run** | Task, Job |
-| Chat-driven single agent call | **Quick Run** | Ad-hoc, Prompt Run |
+OpsSquad is a web dashboard backed by a registry of **DevOps agents** — code review, testing, security scanning, deployment, incident remediation, cost analysis, and more. You either talk to a single agent directly through a chat interface, or chain several of them into a **Flightplan**: a declarative, approval-gated pipeline (e.g. review → test → build → scan → human approval → deploy → verify → auto-rollback). Every action is RBAC-checked, every step is persisted with its reasoning and tool calls, and mutating actions against production always stop for a human approval before they run.
 
-**Why "Flightplan"** — it implies a *pre-approved route with checkpoints*, which is exactly what a multi-agent DevOps workflow is. It also pairs naturally with words you'll need later: `takeoff`, `abort`, `land`, `co-pilot`.
+It's a working scaffold, not a finished product: the orchestration, auth, RBAC, and Flightplan engine are all real and tested end-to-end, but the agents currently act on **deterministic simulated tool output** rather than a real Kubernetes cluster or cloud account — see [Current Functionality](#-current-functionality) for exactly what's real versus simulated.
 
 ---
 
-## 🧱 Tech Stack & Why Each Piece Exists
+## 🧱 Tech Stack
 
 | Layer | Tech | Responsibility |
 |---|---|---|
-| **Frontend** | React + Vite + TailwindCSS | Login page, dashboard, chat UI, Flightplan builder, live run logs |
-| **API Gateway / BFF** | Node.js (Express) | Auth, JWT issue/verify, RBAC middleware, WebSocket streaming, request proxy |
-| **Agent Runtime** | FastAPI (Python) | Agent execution, LLM calls, tool invocation, Flightplan orchestration |
-| **Control Plane** | Flask (Python) | User admin, role management, audit log, integration webhooks, cron jobs |
-| **Database** | PostgreSQL 16 | Users, roles, agents, flightplans, runs, logs, audit trail |
-| **Cache / Queue** | Redis | Session store, run queue, agent shared context |
+| **Frontend** | React + Vite + TailwindCSS | Login, dashboard, chat UI, Flightplan launcher, live run detail, admin panel |
+| **API Gateway / BFF** | Node.js (Express) | Auth, JWT issue/verify, RBAC middleware, WebSocket run streaming, request proxy |
+| **Agent Runtime** | FastAPI (Python) | Agent execution, LLM calls, tool invocation, Flightplan orchestration, admin CRUD, webhooks |
+| **Database** | PostgreSQL 16 | Users, roles, agents, flightplans, runs, run_steps, audit trail |
+| **Cache / Sessions** | Redis | Refresh-token storage today; reserved for run-queue and tool-output caching later |
 
-### ⚠️ Honest Note on the Stack
-Running **Flask and FastAPI together** is unusual — they overlap heavily. Two workable options:
-
-- **Option A (recommended):** Drop Flask. Use FastAPI for everything Python. Simpler ops, one dependency tree.
-- **Option B (as implemented here):** Keep both, but with a **hard boundary** — FastAPI does *async agent work only*, Flask does *synchronous CRUD/admin only*. Never let them share business logic.
-
-This repo follows **Option B** since that was the requirement, but the split is enforced strictly.
+All Python lives in one FastAPI service — an earlier version of this repo split it into a second Flask "control plane" for admin/webhooks, but that boundary added an extra service, an extra dependency tree, and an extra HTTP hop for no real gain, so it was folded back into FastAPI.
 
 ---
 
@@ -51,34 +39,45 @@ This repo follows **Option B** since that was the requirement, but the split is 
 │              Node.js API Gateway / BFF (:4000)                │
 │  • Issues & verifies JWT        • RBAC middleware              │
 │  • WebSocket log streaming      • Rate limiting                │
-│  • Routes to FastAPI or Flask   • Never talks to LLM directly  │
-└──────────┬──────────────────────────────┬────────────────────┘
-           │                              │
-           ▼                              ▼
-┌────────────────────────┐   ┌────────────────────────────────┐
-│ FastAPI Agent Runtime  │   │  Flask Control Plane (:6001)   │
-│        (:8000)         │   │  • User / role CRUD            │
-│  • /agents/run         │   │  • Audit log queries           │
-│  • /flightplans/exec   │   │  • Git & Slack webhooks        │
-│  • /chat (streaming)   │   │  • Scheduled jobs              │
-│  • Orchestrator + LLM  │   │  (no LLM calls here)           │
-└──────────┬─────────────┘   └───────────────┬────────────────┘
-           │                                 │
-           ▼                                 │
-┌────────────────────────┐                   │
-│   Tool Layer (Python)  │                   │
-│ kubectl │ terraform    │                   │
-│ docker  │ trivy        │                   │
-│ git     │ prometheus   │                   │
-└──────────┬─────────────┘                   │
-           │                                 │
-           ▼                                 ▼
+│  • Proxies to FastAPI           • Never talks to LLM directly  │
+└───────────────────────────┬────────────────────────────────────┘
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│                  FastAPI Runtime (:8000)                       │
+│  • /chat, /agents/*/run, /flightplans/*      (agent execution) │
+│  • /admin/*                                  (user/role/audit) │
+│  • /webhooks/*                               (GitHub, Alertmgr)│
+│  • Orchestrator + per-agent modules (app/agents/)               │
+└──────────┬─────────────────────────────────────────────────────┘
+           ▼
+┌────────────────────────┐
+│   Tool Layer (Python)  │   simulated by default — see below
+│ kubectl │ terraform    │
+│ docker  │ trivy        │
+│ git     │ prometheus   │
+└──────────┬─────────────┘
+           ▼
 ┌──────────────────────────────────────────────────────────────┐
 │         PostgreSQL (:5432)          │      Redis (:6379)      │
-│  users, roles, agents, flightplans, │  sessions, run queue,   │
-│  runs, run_steps, audit_logs        │  agent shared context   │
+│  users, roles, agents, flightplans, │  refresh-token store     │
+│  runs, run_steps, audit_logs        │                          │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 🖥️ The Dashboard, Page by Page
+
+| Page | Route | Who | What it does |
+|---|---|---|---|
+| **Login** | `/login` | anyone | Email + password. Seeded credentials are printed on the form itself. |
+| **Dashboard** | `/` | anyone | Run history table — kind, agent or flightplan, status, start time. Click through to a run's detail. |
+| **Chat** | `/chat` | dev+ for mutating agents, viewer for read-only | Free-text prompt box with a staging/prod environment toggle. The intent router matches your prompt to one agent, runs it, and shows the matched agent, its output, and its reasoning inline. A mutating agent targeting `prod` doesn't run — it shows an "awaiting approval" banner instead. |
+| **Flightplans** | `/flightplans` | dev+ | One card per saved Flightplan (name, description, env badge). **Execute** kicks off a run and takes you to its detail page. |
+| **Run Detail** | `/runs/:id` | anyone (own visibility) | Live step-by-step timeline over a WebSocket — each step's agent, status, reasoning, and full output JSON. **Approve** appears for admins when a run is paused at a gate; **Abort** appears for dev+ while a run is still queued or awaiting approval. |
+| **Admin** | `/admin` | admin only | User table with an inline role dropdown per user, plus a live audit log of every mutating action taken anywhere in the system. |
+
+**Typical first session:** log in as `admin@opssquad.dev`, open **Chat** and ask something read-only ("find idle cost resources"), then open **Flightplans** and execute `ship-to-prod` with a repo/commit — watch it run through review/test/build/scan on the **Run Detail** page, approve the gate, and see deploy/verify/rollback play out. Then check **Admin** to see the audit trail it left behind.
 
 ---
 
@@ -126,14 +125,14 @@ This repo follows **Option B** since that was the requirement, but the split is 
 | Use chat agent (read-only agents) | ✅ | ✅ | ✅ |
 | Use chat agent (write/deploy agents) | ✅ | ✅ | ❌ |
 | Create / edit Flightplans | ✅ | ✅ | ❌ |
-| Execute Flightplan — **non-prod** | ✅ | ✅ | ❌ |
-| Execute Flightplan — **prod** | ✅ | ⚠️ needs approval | ❌ |
+| Execute Flightplan — any env | ✅ | ✅ | ❌ |
 | Approve a gated step | ✅ | ❌ | ❌ |
 | Manage users & roles | ✅ | ❌ | ❌ |
-| Manage cloud credentials | ✅ | ❌ | ❌ |
 | View audit log | ✅ | ❌ | ❌ |
 
-**Best practice:** enforce RBAC in the **BFF middleware** *and* re-check in FastAPI. Never rely on the frontend hiding a button.
+A dev **can** trigger a `prod` Flightplan — it just stops at that Flightplan's own approval step (admin-only) before any mutating agent runs. Within a Flightplan, each individual agent's `min_role` is also re-checked against whoever triggered the run, so a dev-authored Flightplan can't sneak in a call to an admin-only agent (e.g. `rollback`) without a gate in front of it.
+
+**Defense in depth:** the BFF's RBAC middleware is a convenience gate for the UI; FastAPI re-verifies every check independently and never trusts the BFF's decision.
 
 ---
 
@@ -145,36 +144,37 @@ See [`db/migrations/001_init.sql`](db/migrations/001_init.sql) for the full sche
 
 ## 🤖 The Agent Registry
 
-Seeded on first boot. Each agent has a **narrow tool scope** — least privilege per agent.
+Seeded on first boot. Each agent has a **narrow tool scope** — least privilege per agent — and its own Python module under [`runtime/app/agents/`](runtime/app/agents/) with real pass/fail logic, not just a tool-call echo.
 
 | Slug | Purpose | Mutating? | Min Role |
 |---|---|:---:|---|
-| `code-review` | Static analysis, secret scan, style feedback on a diff | ❌ | dev |
-| `test-runner` | Selects impacted tests, runs suite, reports failures | ❌ | dev |
+| `code-review` | Diff review — blocks on a committed secret | ❌ | dev |
+| `test-runner` | Runs the impacted test suite, reports failures | ❌ | dev |
 | `build` | Docker build, tag, push to registry | ✅ | dev |
-| `security-scan` | Trivy / Snyk on image + IaC, blocks on CVE severity | ❌ | viewer |
-| `deploy` | Helm upgrade or ArgoCD sync | ✅ | dev |
-| `verify` | Smoke tests + Prometheus metric check post-deploy | ❌ | dev |
-| `rollback` | Reverts to previous stable release | ✅ | admin |
-| `incident-triage` | Reads alert, assigns severity, gathers context | ❌ | viewer |
-| `diagnose` | Pulls pod logs, recent deploys, resource metrics | ❌ | viewer |
-| `remediate` | Restart pod, scale HPA, or trigger rollback | ✅ | admin |
-| `terraform-plan` | Generates HCL, runs `plan`, never applies | ❌ | dev |
+| `security-scan` | CVE scan — blocks on a policy severity breach | ❌ | viewer |
+| `deploy` | Helm upgrade / ArgoCD sync | ✅ | dev |
+| `verify` | Smoke test + error-rate threshold check | ❌ | dev |
+| `rollback` | Reverts to the last known-good release | ✅ | admin |
+| `incident-triage` | Reads an alert, assigns severity | ❌ | viewer |
+| `diagnose` | Pod logs + resource state → a recommended remediation | ❌ | viewer |
+| `remediate` | Restart / scale / rollback, enforced against guardrails | ✅ | admin |
+| `terraform-plan` | Generates a plan, never applies | ❌ | dev |
 | `terraform-apply` | Applies an approved plan | ✅ | admin |
-| `cost-analyzer` | Finds idle resources, right-sizing proposals | ❌ | viewer |
-| `postmortem` | Drafts RCA document from run history | ❌ | viewer |
+| `cost-analyzer` | Finds idle/oversized resources, estimates savings | ❌ | viewer |
+| `postmortem` | Drafts a markdown RCA from the run's own trace | ❌ | viewer |
+| `notify` | Posts a status update to a chat channel | ❌ | viewer |
 
 ---
 
 ## 💬 Chat Agent — Prompt to Execution
 
-### Routing Logic
-
 ```
 Prompt
   │
-  ├─> 1. Intent Router (LLM, cheap model)
-  │      Classifies prompt → agent_slug + extracted parameters
+  ├─> 1. Intent Router
+  │      Claude (if ANTHROPIC_API_KEY set), else a tokenized keyword
+  │      matcher with stemming and stopword filtering
+  │      → agent_slug + extracted parameters
   │
   ├─> 2. RBAC Gate
   │      user.role >= agent.min_role ?  else 403
@@ -182,8 +182,7 @@ Prompt
   ├─> 3. Mutation Gate
   │      agent.is_mutating && env == 'prod' ?  → require approval
   │
-  ├─> 4. Execute agent in FastAPI runtime
-  │      Stream tokens + tool calls over WebSocket
+  ├─> 4. Execute the agent's module, invoking its declared tools
   │
   └─> 5. Persist to runs + run_steps, write audit_log
 ```
@@ -192,17 +191,17 @@ Prompt
 
 ## 🚀 Flightplans — Multi-Agent Workflows
 
-A **Flightplan** is a declarative YAML graph. See [`flightplans/`](flightplans/) for the seeded examples:
+A **Flightplan** is a declarative YAML graph — steps run in dependency order, a step can carry a `when` condition, a `policy.block_on` (fails the whole run on a matching severity), or `guardrails` (fails a `remediate` action outside its allowed set or clamps it to a max). A `type: approval` step pauses the run until an admin approves it; the run's final status reflects whether *any* step failed, not just whether one triggered an early stop.
 
 - [`ship-to-prod.yaml`](flightplans/ship-to-prod.yaml) — review → test → build → scan → **human approval** → deploy → verify → auto-rollback on failure
-- [`incident-response.yaml`](flightplans/incident-response.yaml) — auto-triggered by Alertmanager webhook: triage → diagnose → remediate (guardrailed) → notify → postmortem
-- [`cost-sweep.yaml`](flightplans/cost-sweep.yaml) — nightly cron: find idle resources → open a right-sizing PR (plan only, never applies)
+- [`incident-response.yaml`](flightplans/incident-response.yaml) — triggered by the Alertmanager webhook: triage → diagnose → remediate (guardrailed) → notify → postmortem
+- [`cost-sweep.yaml`](flightplans/cost-sweep.yaml) — meant to run nightly: find idle resources → open a right-sizing PR (plan only, never applies)
 
 ---
 
 ## 🔌 API Endpoints
 
-### Node BFF (`:4000`)
+### Node BFF (`:4000`) — what the frontend talks to
 
 | Method | Route | Role | Purpose |
 |---|---|---|---|
@@ -211,34 +210,34 @@ A **Flightplan** is a declarative YAML graph. See [`flightplans/`](flightplans/)
 | POST | `/api/auth/logout` | any | Revoke refresh token |
 | GET | `/api/me` | any | Current user + permissions |
 | GET | `/api/agents` | any | List agents visible to role |
-| POST | `/api/chat` | dev+ | Proxy to FastAPI, streams back |
+| POST | `/api/chat` | any | Proxy to FastAPI's intent router |
 | GET | `/api/flightplans` | any | List |
 | POST | `/api/flightplans` | dev+ | Create |
 | POST | `/api/flightplans/:id/execute` | dev+ | Trigger a run |
 | GET | `/api/runs` | any | Run history |
 | GET | `/api/runs/:id` | any | Run detail + steps |
 | POST | `/api/runs/:id/approve` | admin | Release a gated step |
-| POST | `/api/runs/:id/abort` | dev+ | Stop a running plan |
-| WS | `/ws/runs/:id` | any | Live log stream |
+| POST | `/api/runs/:id/abort` | dev+ | Stop a queued/awaiting-approval run |
+| GET/POST | `/api/admin/users` | admin | User list / create |
+| PATCH | `/api/admin/users/:id/role` | admin | Change role |
+| GET | `/api/admin/audit` | admin | Audit log, filterable |
+| WS | `/ws/runs/:id` | any | Live run-step stream (polls the DB every 2s — no message broker yet) |
 
-### FastAPI Runtime (`:8000`) — internal only
+### FastAPI Runtime (`:8000`) — internal, plus two public webhook endpoints
 
 | Method | Route | Purpose |
 |---|---|---|
-| POST | `/chat` | Route prompt → agent → stream |
+| POST | `/chat` | Route prompt → agent → run |
 | POST | `/agents/{slug}/run` | Direct agent execution |
-| POST | `/flightplans/execute` | Orchestrate the step graph |
-| GET | `/health` | Liveness |
-
-### Flask Control Plane (`:6001`) — admin only
-
-| Method | Route | Purpose |
-|---|---|---|
+| POST | `/flightplans/{slug}/execute` | Start a Flightplan run |
+| POST | `/flightplans/runs/{id}/approve` | Resume a run past its approval gate |
+| POST | `/runs/{id}/abort` | Abort a run |
 | GET/POST | `/admin/users` | User CRUD |
-| PATCH | `/admin/users/<id>/role` | Change role |
+| PATCH | `/admin/users/{id}/role` | Change role |
 | GET | `/admin/audit` | Audit log with filters |
-| POST | `/webhooks/github` | PR / push events |
-| POST | `/webhooks/alertmanager` | Fire incident Flightplan |
+| POST | `/webhooks/github` | HMAC-verified push/PR events |
+| POST | `/webhooks/alertmanager` | Fires `incident-response` in-process, no auth token needed |
+| GET | `/health` | Liveness |
 
 ---
 
@@ -248,11 +247,14 @@ A **Flightplan** is a declarative YAML graph. See [`flightplans/`](flightplans/)
 opssquad/
 ├── frontend/                    # React + Vite
 ├── bff/                         # Node.js + Express
-├── runtime/                     # FastAPI — orchestrator + tools
-│   └── app/agents/              # one module per agent (real pass/fail logic, no LLM needed)
-├── control/                     # Flask — admin & webhooks
+├── runtime/                     # FastAPI — the only Python service
+│   └── app/
+│       ├── agents/              # one module per agent — real pass/fail logic
+│       ├── tools/                # simulated tool layer (simulate.py = fake data generators)
+│       ├── orchestrator/        # intent router, single-agent executor, Flightplan graph
+│       └── routes/              # chat, agents, flightplans, runs, admin, webhooks
 ├── db/                          # migrations + seed.sql
-├── flightplans/                 # YAML definitions
+├── flightplans/                 # YAML definitions (reference copy; seed.sql has the live JSON)
 ├── k8s/                         # kind cluster manifests + bootstrap.sh
 ├── docker-compose.yml
 └── .env.example
@@ -285,7 +287,6 @@ open http://localhost:5173
 | React | 5173 |
 | Node BFF | 4000 |
 | FastAPI | 8000 |
-| Flask | 6001 |
 | PostgreSQL | 5432 |
 | Redis | 6379 |
 
@@ -295,7 +296,8 @@ Requires `docker`, [`kind`](https://kind.sigs.k8s.io/), and `kubectl` on PATH.
 
 ```bash
 # 1. Bootstrap everything: build images, create/reuse the "opssquad" kind
-#    cluster, apply manifests, run the migration Job, port-forward frontend
+#    cluster, apply manifests, run the migration Job, restart deployments so
+#    they pick up the freshly built images, and port-forward frontend
 #    (:5173) and BFF (:4000) to localhost.
 ./k8s/bootstrap.sh
 
@@ -304,7 +306,7 @@ open http://localhost:5173
 #    login: admin@opssquad.dev / Admin@123
 ```
 
-Idempotent — re-run anytime to pick up code changes (rebuilds images, reloads them into the cluster, restarts rollouts). Uses its own `kubectl --context kind-opssquad`, so it won't touch your current kube context.
+Idempotent — re-run anytime to pick up code changes. Uses its own `kubectl --context kind-opssquad`, so it won't touch your current kube context.
 
 ```bash
 # Stop the port-forwards
@@ -318,41 +320,34 @@ Details and manifest layout in [`k8s/`](k8s/).
 
 ---
 
-## ✅ Best Practices Built In From Day One
+## ✅ Current Functionality
 
-**Security**
-- Every agent gets its **own IAM role / kubeconfig** — never one god credential
-- Mutating agents in prod **always** pass through an approval gate
-- Store cloud creds in **Vault or AWS Secrets Manager**, never in Postgres
-- Re-verify RBAC in FastAPI — the BFF check is convenience, not security
+What's real and tested end-to-end right now:
 
-**Reliability**
-- Hard timeout on every agent (`timeout_sec`) — LLMs hang
-- Every tool call **idempotent** where possible, so retries are safe
-- `reasoning` persisted on each step — you cannot debug or trust an agent without it
-- A **kill switch**: one flag that blocks all mutating agents instantly
+- **Auth & RBAC** — full login/refresh/logout cycle, JWT verified independently at both the BFF and FastAPI, per-agent and per-Flightplan-step role checks.
+- **Chat routing** — a tokenized keyword+stemming matcher (no LLM required) correctly routes a broad set of natural-language prompts to the right agent; swaps to a real Claude tool-use loop when `ANTHROPIC_API_KEY` is set.
+- **15 agent modules** with actual decision logic: `security-scan` really blocks on a CVE severity policy, `test-runner` really fails the run on failing tests, `remediate` really clamps an over-limit scale request against its guardrail, etc. — see [`runtime/app/agents/`](runtime/app/agents/).
+- **Flightplan engine** — dependency-ordered steps, `when` conditions, approval gates, policy/guardrail enforcement, correct final-status computation (a run that failed and auto-rolled-back is reported as failed, not success).
+- **Alertmanager webhook** — actually fires `incident-response` in-process on receipt, no extra configuration needed.
+- **Admin panel** — user CRUD, role changes, and a full audit trail of every mutating action.
+- **Two deploy paths** — `docker compose` for local dev, `k8s/bootstrap.sh` for a local Kubernetes cluster via `kind`.
 
-**Cost & Performance**
-- Small model for the intent router, a large one only for reasoning agents
-- Read-only tool output cached in Redis (cluster state, cost data) for 5–15 min
-- Token caps per run and per user per day
+What's **simulated**, not real, by default (no `ANTHROPIC_API_KEY` needed to try any of this):
 
-**Rollout Order**
-1. Auth + RBAC + dashboard shell
-2. Chat agent with **read-only agents only** (`diagnose`, `cost-analyzer`)
-3. Run history and log streaming
-4. Flightplans with approval gates
-5. Mutating agents, staging first — prod last
+- Every tool call (`kubectl.*`, `terraform.*`, `trivy.scan`, `docker.*`, `cloud.cost_explorer`, `prometheus.query`, `slack.post`, …) returns deterministic fake data generated from [`runtime/app/tools/simulate.py`](runtime/app/tools/simulate.py) — seeded by its own input, so the same commit or alert always produces the same result, and different input produces different (sometimes failing) results.
+- No real Kubernetes, cloud provider, registry, or Slack workspace is touched.
 
 ---
 
-## 🗺️ Roadmap
+## 🔮 In Development / Future Integrations
 
-| Phase | Deliverable |
-|---|---|
-| **v0.1** | Auth, RBAC, dashboard, 3 read-only agents via chat |
-| **v0.2** | Run history, live WebSocket logs, audit trail |
-| **v0.3** | Flightplan engine + YAML definitions + approval gates |
-| **v0.4** | Mutating agents (build, deploy, rollback) on staging |
-| **v0.5** | Incident response auto-trigger from Alertmanager |
-| **v1.0** | Prod-ready: Vault integration, kill switch, cost caps, SSO |
+Roughly in the order they'd need to happen to move this from a scaffold toward production use:
+
+- **Real tool integrations** — swap each simulated tool in `app/tools/` for an actual `kubectl`/`helm`/`terraform`/`trivy`/cloud-SDK/Slack call. This is the biggest remaining chunk of work; the agent logic that consumes tool output is already written and doesn't need to change shape.
+- **GitHub webhook → real trigger** — `/webhooks/github` currently just acknowledges push/PR events; it doesn't yet map them into a `ship-to-prod` run.
+- **A real job queue** — Flightplan execution runs synchronously inside the HTTP request handler today, so `abort` can only stop a run that hasn't started executing yet (`queued` / `awaiting_approval`), not one mid-flight. A worker queue (Redis is already provisioned for this) would let long-running or scheduled Flightplans run in the background and be genuinely cancellable.
+- **Scheduler for cron-triggered Flightplans** — `cost-sweep.yaml` declares a `schedule.cron`, but nothing currently reads it; it has to be triggered manually or by an external cron job hitting the API.
+- **Flightplan builder UI** — the API to create/edit a Flightplan already exists (`POST /api/flightplans`), but the dashboard has no visual builder for it yet — only the three seeded Flightplans can be launched from the UI.
+- **Secrets management** — credentials currently live in a `.env` file or a plain Kubernetes `Secret`; a Vault/AWS Secrets Manager integration would replace that.
+- **SSO** and **per-user/per-day token or cost caps** — not implemented.
+- **Redis-backed tool-output caching** — Redis is only used for refresh tokens today; caching read-only tool output (cluster state, cost data) for a few minutes is a cheap follow-up once real tools exist.

@@ -15,6 +15,5 @@ data:
   AGENT_MODEL: "claude-sonnet-5"
   BFF_PORT: "4000"
   RUNTIME_URL: "http://runtime:8000"
-  CONTROL_URL: "http://control:6001"
   FRONTEND_ORIGIN: "http://localhost:5173"
   MUTATING_AGENTS_ENABLED: "true"

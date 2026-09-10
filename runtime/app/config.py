@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     intent_router_model: str = "claude-haiku-4-5-20251001"
     agent_model: str = "claude-sonnet-5"
     mutating_agents_enabled: bool = True
+    github_webhook_secret: str = ""
 
     class Config:
         env_file = ".env"

@@ -26,7 +26,6 @@ done
 
 log "Building images"
 docker build -t opssquad/runtime:local  "$ROOT_DIR/runtime"
-docker build -t opssquad/control:local  "$ROOT_DIR/control"
 docker build -t opssquad/bff:local      "$ROOT_DIR/bff"
 docker build -t opssquad/frontend:local "$ROOT_DIR/frontend"
 
@@ -44,8 +43,7 @@ fi
 
 log "Loading images into the cluster"
 kind load docker-image \
-  opssquad/runtime:local opssquad/control:local \
-  opssquad/bff:local opssquad/frontend:local \
+  opssquad/runtime:local opssquad/bff:local opssquad/frontend:local \
   --name "$CLUSTER_NAME"
 
 log "Applying namespace, config, secrets, and data stores"
@@ -74,21 +72,34 @@ fi
 
 log "Applying application deployments"
 k apply -f "$K8S_DIR/30-runtime.yaml"
-k apply -f "$K8S_DIR/31-control.yaml"
 k apply -f "$K8S_DIR/32-bff.yaml"
 k apply -f "$K8S_DIR/33-frontend.yaml"
 
+# Images are always rebuilt above but keep the same :local tag, so `apply`
+# sees no spec diff and won't restart already-running pods even though the
+# node's image content changed. Force it every run.
+log "Restarting deployments to pick up the freshly built images"
+k -n "$NAMESPACE" rollout restart deployment/runtime deployment/bff deployment/frontend
+
 log "Waiting for application rollouts"
 k -n "$NAMESPACE" rollout status deployment/runtime  --timeout=120s
-k -n "$NAMESPACE" rollout status deployment/control  --timeout=120s
 k -n "$NAMESPACE" rollout status deployment/bff      --timeout=120s
 k -n "$NAMESPACE" rollout status deployment/frontend --timeout=120s
 
+log "Stopping any previous port-forwards"
 if [ -f "$PIDFILE" ]; then
-  log "Stopping previous port-forwards"
   while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
   rm -f "$PIDFILE"
 fi
+fuser -k -TERM 5173/tcp 4000/tcp 2>/dev/null || true
+# kill is async — wait for the ports to actually free before rebinding them,
+# otherwise the new port-forward can lose the race and fail to listen.
+for port in 5173 4000; do
+  for _ in $(seq 1 20); do
+    ss -tln | grep -q ":$port " || break
+    sleep 0.25
+  done
+done
 
 log "Starting port-forwards (frontend :5173, bff :4000)"
 k -n "$NAMESPACE" port-forward svc/frontend 5173:5173 >/tmp/opssquad-k8s-pf-frontend.log 2>&1 &

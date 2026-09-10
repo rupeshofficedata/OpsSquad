@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.db import close_pool, init_pool
-from app.routes import agents, chat, flightplans, runs
+from app.routes import admin, agents, chat, flightplans, runs, webhooks
 
 
 @asynccontextmanager
@@ -19,6 +19,8 @@ app.include_router(chat.router)
 app.include_router(agents.router)
 app.include_router(flightplans.router)
 app.include_router(runs.router)
+app.include_router(admin.router)
+app.include_router(webhooks.router)
 
 
 @app.get("/health")

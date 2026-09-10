@@ -5,7 +5,7 @@ export function roleAtLeast(userRole, requiredRole) {
 }
 
 // This is a convenience gate for the UI/UX — the real enforcement happens
-// again in FastAPI/Flask, which never trust the BFF's check alone.
+// again in FastAPI, which never trusts the BFF's check alone.
 export function requireRole(minRole) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: "Not authenticated" });

@@ -35,7 +35,7 @@ async def get_flightplan_by_id(flightplan_id: str) -> dict[str, Any] | None:
 
 async def create_run(
     kind: str,
-    triggered_by: str,
+    triggered_by: str | None,
     agent_id: str | None = None,
     flightplan_id: str | None = None,
     prompt: str | None = None,
@@ -128,7 +128,7 @@ async def count_run_steps(run_id: str) -> int:
     return int(row["n"])
 
 
-async def write_audit_log(user_id: str, action: str, target: str, metadata: dict[str, Any]) -> None:
+async def write_audit_log(user_id: str | None, action: str, target: str, metadata: dict[str, Any]) -> None:
     pool = get_pool()
     await pool.execute(
         """
@@ -137,3 +137,45 @@ async def write_audit_log(user_id: str, action: str, target: str, metadata: dict
         """,
         user_id, action, target, metadata,
     )
+
+
+async def list_users() -> list[dict[str, Any]]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT id, email, full_name, role, is_active, last_login_at, created_at FROM users ORDER BY created_at"
+    )
+    return [dict(r) for r in rows]
+
+
+async def create_user(email: str, password_hash: str, full_name: str | None, role: str) -> dict[str, Any]:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO users (email, password_hash, full_name, role)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, email, full_name, role, is_active, created_at
+        """,
+        email, password_hash, full_name, role,
+    )
+    return dict(row)
+
+
+async def update_user_role(user_id: str, role: str) -> dict[str, Any] | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "UPDATE users SET role = $2 WHERE id = $1 RETURNING id, email, role", user_id, role
+    )
+    return dict(row) if row else None
+
+
+async def list_audit_log(action: str | None, user_id: str | None, limit: int) -> list[dict[str, Any]]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT * FROM audit_logs
+        WHERE ($1::text IS NULL OR action = $1) AND ($2::uuid IS NULL OR user_id = $2)
+        ORDER BY created_at DESC LIMIT $3
+        """,
+        action, user_id, limit,
+    )
+    return [dict(r) for r in rows]
