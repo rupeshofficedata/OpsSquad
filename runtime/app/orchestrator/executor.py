@@ -49,9 +49,13 @@ async def run_agent(
         try:
             output, reasoning, tool_calls = await _run_with_local_llm(agent, params, tool_names, model_name)
             status = "success"  # same caveat as Claude below — we don't parse free text for pass/fail
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+            # HTTPStatusError added after a live 500 from llama-server itself
+            # (not a connection problem) crashed this endpoint outright —
+            # any local-LLM failure should degrade to simulated, the same
+            # way an unreachable server already does, not surface a raw 500.
             output, reasoning, tool_calls, status = await _run_simulated(agent, params, tool_names)
-            reasoning = f"Local LLM at {settings.local_llm_base_url} unreachable ({exc}) — ran simulated instead. {reasoning}"
+            reasoning = f"Local LLM at {settings.local_llm_base_url} failed ({exc}) — ran simulated instead. {reasoning}"
     elif model_provider == "anthropic" and settings.anthropic_api_key:
         output, reasoning, tool_calls = await _run_with_claude(agent, params, tool_names, model_name)
         status = "success"  # Claude reasons freely over the tools; we don't parse its text for pass/fail
@@ -159,26 +163,118 @@ async def _run_with_claude(
     return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls
 
 
-_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+# Any (or no) fence language tag — observed live: ```xml wrapping a JSON
+# payload, not just ```json.
+_CODE_FENCE_RE = re.compile(r"```(?:\w+)?\s*(.*?)\s*```", re.DOTALL)
+# A self-closing-ish XML tag with attributes — observed live in at least 3
+# shapes: <function name="..." arguments="..."/>, <tool name="..."
+# arguments="..."/>, and <secrets.scan arguments="..."/> (the tag name
+# itself IS the tool name, no separate name= attribute at all).
+_XML_TAG_RE = re.compile(r"<([\w][\w.]*)\s+([^<>]*?)/?>", re.DOTALL)
+_XML_NAME_ATTR_RE = re.compile(r'\bname\s*=\s*(["\'])(.*?)\1', re.DOTALL)
+_XML_ARGS_ATTR_START_RE = re.compile(r"\barguments\s*=\s*")
+# Generic wrapper tag names that are never themselves a real tool name (a
+# real tool name always has a dot, e.g. "kubectl.get") — for these the
+# actual name must come from a name= attribute instead.
+_GENERIC_XML_TAGS = {"tool", "tools", "function", "functions", "response", "call", "invoke"}
 
 
-def _extract_content_tool_calls(content: str) -> list[dict[str, Any]]:
-    """Best-effort parse of {"name": ..., "arguments": {...}} object(s) a
-    local model wrote into its text response instead of the structured
-    tool_calls field. Finds every fenced block, not just the first —
-    observed live: a single message can propose several calls in separate
-    fences ("```json {call 1} ``` ```json {call 2} ```")."""
-    text = content.strip()
-    fences = _CODE_FENCE_RE.findall(text)
-    candidates = fences if fences else [text]
-    found = []
-    for candidate in candidates:
+def _extract_attr_value_at(text: str, start: int) -> str | None:
+    """The value of an XML-ish attribute at `start` (right after its `=`)
+    — either quoted ("..."/'...') or, observed live, an unquoted bare
+    {...} object (arguments={} with no quotes around it at all)."""
+    if start >= len(text):
+        return None
+    ch = text[start]
+    if ch in ("'", '"'):
+        end = text.find(ch, start + 1)
+        return text[start + 1:end] if end != -1 else None
+    if ch == "{":
+        objs = _find_balanced_json_objects(text[start:])
+        return objs[0] if objs else None
+    return None
+
+
+def _parse_xml_style_call(tag_name: str, attrs_text: str) -> dict[str, Any] | None:
+    args_match = _XML_ARGS_ATTR_START_RE.search(attrs_text)
+    args_raw = _extract_attr_value_at(attrs_text, args_match.end()) if args_match else None
+    if args_raw is None:
+        return None
+    name_match = _XML_NAME_ATTR_RE.search(attrs_text)
+    name = (name_match.group(2) if name_match else None) or (
+        tag_name if tag_name.lower() not in _GENERIC_XML_TAGS else None
+    )
+    if not name:
+        return None
+    # Python-dict-style single-quoted values observed live too
+    # (arguments="{ 'key': 'value' }") — not valid JSON as-is.
+    for candidate in (args_raw, args_raw.replace("'", '"')):
+        try:
+            return {"name": name, "arguments": json.loads(candidate) if candidate.strip() else {}}
+        except json.JSONDecodeError:
+            continue
+    return {"name": name, "arguments": {}}
+
+
+def _find_balanced_json_objects(text: str) -> list[str]:
+    """Every top-level {...} substring via brace counting — robust against
+    arbitrary wrapper noise around it (XML tags, prose, multiple objects
+    concatenated without array brackets), unlike a single json.loads call."""
+    objects: list[str] = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                objects.append(text[start:i + 1])
+                start = None
+    return objects
+
+
+def _parse_tool_call_json(blob: str) -> dict[str, Any] | None:
+    # {{...}} instead of {...} observed live too — a leaked Jinja
+    # chat-template artifact, not deliberate JSON syntax; genuine JSON
+    # essentially never has literal adjacent "{{"/"}}", so normalizing it
+    # is safe.
+    for candidate in (blob, blob.replace("{{", "{").replace("}}", "}")):
         try:
             obj = json.loads(candidate)
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
-            found.append(obj)
+            return obj
+    return None
+
+
+def _extract_content_tool_calls(content: str) -> list[dict[str, Any]]:
+    """Best-effort parse of tool-call-shaped data a local model wrote into
+    its text response instead of the structured tool_calls field — this
+    7B model has been observed live using at least 4 different malformed
+    shapes for the same intent: bare JSON, a ```json fence, a ```xml fence
+    wrapping JSON (sometimes with doubled braces or multiple concatenated
+    objects), and a Hermes-style <function name=... arguments=.../> tag.
+    Handles all of them via brace-counting rather than one regex per shape,
+    since a small model's inconsistency here isn't a fixed, enumerable set."""
+    text = content.strip()
+
+    found: list[dict[str, Any]] = []
+    for tag_name, attrs_text in _XML_TAG_RE.findall(text):
+        call = _parse_xml_style_call(tag_name, attrs_text)
+        if call:
+            found.append(call)
+
+    fences = _CODE_FENCE_RE.findall(text)
+    for candidate in (fences if fences else [text]):
+        blobs = _find_balanced_json_objects(candidate) or [candidate]
+        for blob in blobs:
+            obj = _parse_tool_call_json(blob)
+            if obj:
+                found.append(obj)
     return found
 
 
@@ -295,12 +391,16 @@ async def _run_with_local_llm(
                 tool_calls.append({"tool": name, "input": call_args, "result": result_payload})
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(result_payload)})
 
-    if not stopped_cleanly and tool_calls:
-        # Burned every iteration still proposing new calls, never produced
-        # a real synthesis — final_text at this point is just more
-        # unexecuted-in-this-turn proposal noise, not an answer. The tool
-        # results themselves are real though, so show those plainly
-        # instead of the model's last ramble.
+    # A "clean" stop isn't always a real answer — observed live: the
+    # model's last proposal used invalid JSON (Python-style single-quoted
+    # list) so it silently failed to parse into a call, the loop correctly
+    # saw "no calls" and stopped, but final_text is still that broken
+    # proposal, not prose. Treat that the same as running out of
+    # iterations: prefer the real tool results already collected.
+    final_looks_unexecuted = "<function " in final_text or (
+        "```" in final_text and "arguments" in final_text and ('"name"' in final_text or "'name'" in final_text)
+    )
+    if tool_calls and (not stopped_cleanly or final_looks_unexecuted):
         final_text = f"Model did not produce a final summary after {MAX_TOOL_ITERATIONS} tool-call rounds. Real tool results:\n" + "\n".join(
             f"- {tc['tool']}({tc['input']}) -> {tc['result'].get('data') or tc['result'].get('error')}" for tc in tool_calls
         )
