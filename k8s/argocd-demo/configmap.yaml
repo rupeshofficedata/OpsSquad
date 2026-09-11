@@ -12,4 +12,4 @@ metadata:
   name: argocd-demo
   namespace: opssquad
 data:
-  message: "hello from ArgoCD, synced by a real GitOps controller"
+  message: "v2 — hello from ArgoCD, synced by a real GitOps controller"
