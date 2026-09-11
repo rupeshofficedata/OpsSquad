@@ -30,6 +30,7 @@ export default function Dashboard() {
             <tr>
               <th className="px-4 py-2">Kind</th>
               <th className="px-4 py-2">Agent / Flightplan</th>
+              <th className="px-4 py-2">Question</th>
               <th className="px-4 py-2">Status</th>
               <th className="px-4 py-2">Started</th>
             </tr>
@@ -43,13 +44,14 @@ export default function Dashboard() {
                   </Link>
                 </td>
                 <td className="px-4 py-2">{r.agent_slug || r.flightplan_slug || "—"}</td>
+                <td className="max-w-xs truncate px-4 py-2 text-slate-300" title={r.prompt || ""}>{r.prompt || "—"}</td>
                 <td className={`px-4 py-2 font-medium ${STATUS_COLOR[r.status] || ""}`}>{r.status}</td>
                 <td className="px-4 py-2 text-slate-400">{new Date(r.started_at).toLocaleString()}</td>
               </tr>
             ))}
             {runs.length === 0 && (
               <tr>
-                <td colSpan={4} className="px-4 py-6 text-center text-slate-500">
+                <td colSpan={5} className="px-4 py-6 text-center text-slate-500">
                   No runs yet — try the Chat page.
                 </td>
               </tr>

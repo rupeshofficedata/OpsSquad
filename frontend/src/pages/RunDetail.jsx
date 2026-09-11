@@ -83,6 +83,12 @@ export default function RunDetail() {
         </div>
       </div>
 
+      {run.prompt && (
+        <p className="rounded-md border border-slate-800 bg-slate-900/40 p-3 text-sm text-slate-300">
+          <span className="text-slate-500">Question: </span>{run.prompt}
+        </p>
+      )}
+
       {error && <p className="text-amber-400 text-sm">{error}</p>}
 
       <ol className="space-y-3">
