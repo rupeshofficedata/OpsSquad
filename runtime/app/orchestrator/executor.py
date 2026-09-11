@@ -159,19 +159,21 @@ async def _run_with_claude(
     return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls
 
 
-_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
 def _extract_content_tool_call(content: str) -> dict[str, Any] | None:
     """Best-effort parse of a {"name": ..., "arguments": {...}} object a
     local model wrote into its text response instead of the structured
-    tool_calls field."""
+    tool_calls field. Anchored full-string matching missed the common real
+    case (observed live): prose before/after the fence, e.g. "I will use
+    the kubectl.get tool ... ```json {...} ``` --- Summary: ..." — search
+    for the fence anywhere instead of requiring the whole message to be it."""
     text = content.strip()
-    fence = _CODE_FENCE_RE.match(text)
-    if fence:
-        text = fence.group(1)
+    fence = _CODE_FENCE_RE.search(text)
+    candidate = fence.group(1) if fence else text
     try:
-        obj = json.loads(text)
+        obj = json.loads(candidate)
     except json.JSONDecodeError:
         return None
     return obj if isinstance(obj, dict) and "name" in obj and "arguments" in obj else None
