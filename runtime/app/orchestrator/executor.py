@@ -162,21 +162,24 @@ async def _run_with_claude(
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
-def _extract_content_tool_call(content: str) -> dict[str, Any] | None:
-    """Best-effort parse of a {"name": ..., "arguments": {...}} object a
+def _extract_content_tool_calls(content: str) -> list[dict[str, Any]]:
+    """Best-effort parse of {"name": ..., "arguments": {...}} object(s) a
     local model wrote into its text response instead of the structured
-    tool_calls field. Anchored full-string matching missed the common real
-    case (observed live): prose before/after the fence, e.g. "I will use
-    the kubectl.get tool ... ```json {...} ``` --- Summary: ..." — search
-    for the fence anywhere instead of requiring the whole message to be it."""
+    tool_calls field. Finds every fenced block, not just the first —
+    observed live: a single message can propose several calls in separate
+    fences ("```json {call 1} ``` ```json {call 2} ```")."""
     text = content.strip()
-    fence = _CODE_FENCE_RE.search(text)
-    candidate = fence.group(1) if fence else text
-    try:
-        obj = json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
-    return obj if isinstance(obj, dict) and "name" in obj and "arguments" in obj else None
+    fences = _CODE_FENCE_RE.findall(text)
+    candidates = fences if fences else [text]
+    found = []
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
+            found.append(obj)
+    return found
 
 
 async def _run_with_local_llm(
@@ -213,6 +216,8 @@ async def _run_with_local_llm(
     reasoning_parts: list[str] = []
     final_text = ""
     seen_call_signatures: set[str] = set()
+    fallback_call_counter = 0
+    stopped_cleanly = False
 
     async with httpx.AsyncClient(timeout=LOCAL_LLM_TIMEOUT) as client:
         for _ in range(MAX_TOOL_ITERATIONS):
@@ -236,17 +241,30 @@ async def _run_with_local_llm(
             if not calls and message.get("content"):
                 # Small/local models frequently don't emit the structured
                 # OpenAI tool_calls field even with --jinja and a tools
-                # payload — they write the call as JSON text instead
-                # (observed with Qwen2.5-Coder via llama-server). Fall back
-                # to parsing that out of content rather than treating a
-                # clear tool-call attempt as "no tool calls, we're done."
-                fallback = _extract_content_tool_call(message["content"])
-                if fallback:
-                    calls = [{
-                        "id": "local-fallback-0",
+                # payload — they write the call(s) as JSON text instead
+                # (observed with Qwen2.5-Coder via llama-server), sometimes
+                # several fenced calls in one message. Fall back to parsing
+                # those out of content rather than treating a clear
+                # tool-call attempt as "no tool calls, we're done."
+                for fallback in _extract_content_tool_calls(message["content"]):
+                    calls.append({
+                        "id": f"local-fallback-{fallback_call_counter}",
+                        "type": "function",
                         "function": {"name": fallback["name"], "arguments": json.dumps(fallback.get("arguments", {}))},
-                    }]
+                    })
+                    fallback_call_counter += 1
+                if calls:
+                    # The model never actually emitted a structured
+                    # tool_calls field, so message.tool_calls is still
+                    # missing/empty — appending message as-is to history
+                    # would then pair the tool-result messages below with a
+                    # tool_call_id the assistant never declared, which
+                    # local models frequently fail to recognize as "this
+                    # already ran" and just re-propose it forever instead
+                    # of stopping. Declare it properly before it's appended.
+                    message = {**message, "tool_calls": calls}
             if not calls:
+                stopped_cleanly = True
                 break
 
             # Small local models frequently fail to recognize a tool result
@@ -255,6 +273,7 @@ async def _run_with_local_llm(
             # that burns every iteration on identical repeated no-op calls.
             signatures = {call["function"]["name"] + "|" + (call["function"].get("arguments") or "") for call in calls}
             if signatures <= seen_call_signatures:
+                stopped_cleanly = True
                 break
             seen_call_signatures |= signatures
 
@@ -275,5 +294,15 @@ async def _run_with_local_llm(
 
                 tool_calls.append({"tool": name, "input": call_args, "result": result_payload})
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(result_payload)})
+
+    if not stopped_cleanly and tool_calls:
+        # Burned every iteration still proposing new calls, never produced
+        # a real synthesis — final_text at this point is just more
+        # unexecuted-in-this-turn proposal noise, not an answer. The tool
+        # results themselves are real though, so show those plainly
+        # instead of the model's last ramble.
+        final_text = f"Model did not produce a final summary after {MAX_TOOL_ITERATIONS} tool-call rounds. Real tool results:\n" + "\n".join(
+            f"- {tc['tool']}({tc['input']}) -> {tc['result'].get('data') or tc['result'].get('error')}" for tc in tool_calls
+        )
 
     return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls
