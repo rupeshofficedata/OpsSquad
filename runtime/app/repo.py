@@ -54,13 +54,25 @@ async def create_run(
     pool = get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO runs (kind, agent_id, flightplan_id, prompt, inputs, status, triggered_by)
-        VALUES ($1, $2, $3, $4, $5, 'running', $6)
+        INSERT INTO runs (kind, agent_id, flightplan_id, prompt, inputs, triggered_by)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id
         """,
         kind, agent_id, flightplan_id, prompt, inputs, triggered_by,
     )
     return str(row["id"])
+
+
+async def mark_run_running(run_id: str) -> None:
+    """Flips a run from 'queued' or 'awaiting_approval' to 'running' right as
+    its background task actually starts executing steps. No-ops (via the
+    WHERE guard) if the run was aborted in the gap between being queued and
+    the task getting scheduled."""
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE runs SET status = 'running' WHERE id = $1 AND status IN ('queued', 'awaiting_approval')",
+        run_id,
+    )
 
 
 async def finish_run(run_id: str, status: str, result: dict[str, Any] | None = None) -> None:
@@ -116,15 +128,16 @@ async def get_run(run_id: str) -> dict[str, Any] | None:
 
 
 async def abort_run(run_id: str) -> bool:
-    """Aborts a run still sitting in 'queued' or 'awaiting_approval'. Returns
-    False if the run has already finished or isn't in an abortable state —
-    there is no background worker in this scaffold, so a run actively
-    executing inside a request handler can't be interrupted mid-flight."""
+    """Aborts a run in 'queued', 'running', or 'awaiting_approval'. Returns
+    False if the run has already finished. Flightplan execution runs as a
+    background task (see orchestrator/graph.py) that checks this status
+    between steps — so a 'running' run stops before its *next* step, not
+    mid-step (no preemptive kill of an in-flight tool call)."""
     pool = get_pool()
     row = await pool.fetchrow(
         """
         UPDATE runs SET status = 'aborted', finished_at = NOW()
-        WHERE id = $1 AND status IN ('queued', 'awaiting_approval')
+        WHERE id = $1 AND status IN ('queued', 'running', 'awaiting_approval')
         RETURNING id
         """,
         run_id,

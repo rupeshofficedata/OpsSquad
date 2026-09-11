@@ -1,8 +1,10 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from app import repo
 from app.models import FlightplanExecuteRequest
-from app.orchestrator.graph import execute_flightplan, resume_flightplan
+from app.orchestrator.graph import execute_flightplan, resume_flightplan, run_in_background
 from app.security import User, current_user, require_role, role_at_least
 
 router = APIRouter(prefix="/flightplans", tags=["flightplans"])
@@ -29,11 +31,13 @@ async def execute(slug: str, req: FlightplanExecuteRequest, user: User = Depends
     await repo.write_audit_log(user.id, "flightplan.execute", slug, {"run_id": run_id, "inputs": req.inputs})
 
     model_provider, model_name = await repo.get_user_model_preference(user.id)
-    status = await execute_flightplan(
+    # Backgrounded so this request returns immediately instead of blocking
+    # for the whole run — RunDetail's WS stream/polling picks up progress.
+    asyncio.create_task(run_in_background(run_id, execute_flightplan(
         run_id, flightplan, req.inputs, user_role=user.role,
         model_provider=model_provider, model_name=model_name,
-    )
-    return {"status": status, "run_id": run_id}
+    )))
+    return {"status": "queued", "run_id": run_id}
 
 
 @router.post("/runs/{run_id}/approve")
@@ -55,8 +59,8 @@ async def approve(run_id: str, user: User = Depends(require_role("admin"))):
     model_provider, model_name = await repo.get_user_model_preference(run["triggered_by"])
 
     await repo.write_audit_log(user.id, "flightplan.approve", flightplan["slug"], {"run_id": run_id})
-    status = await resume_flightplan(
+    asyncio.create_task(run_in_background(run_id, resume_flightplan(
         run_id, flightplan, run["inputs"] or {}, user_role=triggering_role,
         model_provider=model_provider, model_name=model_name,
-    )
-    return {"status": status, "run_id": run_id}
+    )))
+    return {"status": "running", "run_id": run_id}

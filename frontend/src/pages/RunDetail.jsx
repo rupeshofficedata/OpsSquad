@@ -75,7 +75,7 @@ export default function RunDetail() {
               Approve
             </button>
           )}
-          {["queued", "awaiting_approval"].includes(run.status) && (
+          {["queued", "running", "awaiting_approval"].includes(run.status) && (
             <button onClick={handleAbort} className="rounded-md border border-red-700 px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">
               Abort
             </button>

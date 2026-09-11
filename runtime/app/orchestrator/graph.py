@@ -9,8 +9,9 @@ real restricted evaluator (AST allowlist, attribute access is dict-key
 lookup, never getattr()), not eval(). See that module's docstring for why.
 """
 
+import logging
 import re
-from typing import Any
+from typing import Any, Coroutine
 
 from app import repo
 from app.config import settings
@@ -18,7 +19,22 @@ from app.orchestrator.executor import run_agent
 from app.orchestrator.safe_eval import evaluate as safe_evaluate
 from app.security import role_at_least
 
+logger = logging.getLogger(__name__)
+
 TEMPLATE_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+async def run_in_background(run_id: str, coro: Coroutine[Any, Any, str]) -> None:
+    """Runs a Flightplan execution/resume coroutine as a background task
+    (see routes/flightplans.py and routes/webhooks.py) instead of blocking
+    the HTTP request until every step finishes. Nothing else awaits this
+    task, so an unexpected exception here would otherwise leave the run
+    stuck 'running' forever — caught and recorded as 'failed' instead."""
+    try:
+        await coro
+    except Exception:
+        logger.exception("flightplan run %s crashed", run_id)
+        await repo.finish_run(run_id, "failed")
 
 
 def _resolve_templates(value: Any, context: dict[str, Any]) -> Any:
@@ -101,6 +117,8 @@ async def _run_steps(
     run_id: str, flightplan: dict[str, Any], context: dict[str, Any], start_at: int, user_role: str,
     model_provider: str = "anthropic", model_name: str | None = None,
 ) -> str:
+    await repo.mark_run_running(run_id)
+
     steps = _topo_order(flightplan["definition"]["steps"])
     # Derived from `context` (not a fresh False) so a resume after an
     # approval gate still remembers a failure from *before* the pause —
@@ -111,6 +129,14 @@ async def _run_steps(
     for order, step in enumerate(steps):
         if order < start_at:
             continue
+
+        # Cooperative abort: checked between steps, not preemptively — a
+        # step already running (an agent's tool call) finishes first. See
+        # repo.abort_run. finish_run isn't called here since abort_run
+        # already set status + finished_at.
+        run = await repo.get_run(run_id)
+        if run is not None and run["status"] == "aborted":
+            return "aborted"
 
         if step.get("when") is not None:
             should_run = _eval_expr(step["when"].strip("${}"), context)

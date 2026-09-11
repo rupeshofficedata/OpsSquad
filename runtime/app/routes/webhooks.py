@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 
@@ -5,7 +6,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 
 from app import repo
 from app.config import settings
-from app.orchestrator.graph import execute_flightplan
+from app.orchestrator.graph import execute_flightplan, run_in_background
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -52,6 +53,10 @@ async def alertmanager_webhook(request: Request, authorization: str | None = Hea
         kind="flightplan", flightplan_id=flightplan["id"], triggered_by=None, inputs={"alert": payload}
     )
     await repo.write_audit_log(None, "flightplan.execute", "incident-response", {"run_id": run_id, "source": "alertmanager"})
-    status = await execute_flightplan(run_id, flightplan, {"alert": payload}, user_role="admin")
+    # Backgrounded, same as POST /flightplans/{slug}/execute — Alertmanager
+    # shouldn't be kept waiting on a possibly multi-step incident-response run.
+    asyncio.create_task(run_in_background(
+        run_id, execute_flightplan(run_id, flightplan, {"alert": payload}, user_role="admin")
+    ))
 
-    return {"received": True, "triggered": True, "run_id": run_id, "status": status}
+    return {"received": True, "triggered": True, "run_id": run_id, "status": "queued"}
