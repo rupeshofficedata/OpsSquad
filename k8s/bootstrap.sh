@@ -69,6 +69,32 @@ if ! k -n "$NAMESPACE" wait --for=condition=complete job/opssquad-vault-init --t
   exit 1
 fi
 
+log "Installing ArgoCD (core-install: application-controller + repo-server + redis — real argocd.sync/rollback target)"
+k apply -f "$K8S_DIR/08-argocd-namespace.yaml"
+k -n argocd apply -f "$K8S_DIR/08-argocd-core-install.yaml"
+k -n argocd rollout status statefulset/argocd-application-controller --timeout=120s
+k -n argocd rollout status deployment/argocd-repo-server --timeout=120s
+k -n argocd rollout status deployment/argocd-redis --timeout=120s
+k apply -f "$K8S_DIR/09-argocd-rbac.yaml"
+
+log "Creating ArgoCD repo-credentials Secret from gh auth token (never committed)"
+GH_TOKEN="$(gh auth token)"
+cat <<EOF | k apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-demo-repo-creds
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: https://github.com/rupeshofficedata/OpsSquad.git
+  username: x-access-token
+  password: $GH_TOKEN
+EOF
+k apply -f "$K8S_DIR/09-argocd-app.yaml"
+
 log "Syncing db/migrations + db/seed.sql into a ConfigMap and running the migration Job"
 k -n "$NAMESPACE" create configmap opssquad-sql \
   --from-file=001_init.sql="$ROOT_DIR/db/migrations/001_init.sql" \

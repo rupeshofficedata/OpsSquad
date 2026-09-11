@@ -31,6 +31,16 @@ spec:
               valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: GITHUB_WEBHOOK_SECRET } }
             - name: ALERTMANAGER_WEBHOOK_TOKEN
               valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: ALERTMANAGER_WEBHOOK_TOKEN } }
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: AWS_ACCESS_KEY_ID } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: AWS_SECRET_ACCESS_KEY } }
+            - name: AWS_REGION
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: AWS_REGION } }
+            - name: SLACK_WEBHOOK_URL
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: SLACK_WEBHOOK_URL } }
+            - name: PAGERDUTY_API_TOKEN
+              valueFrom: { secretKeyRef: { name: opssquad-vault-seed, key: PAGERDUTY_API_TOKEN } }
           command:
             - sh
             - -c
@@ -42,7 +52,7 @@ spec:
               vault auth enable kubernetes || true
               vault write auth/kubernetes/config kubernetes_host=https://kubernetes.default.svc
 
-              printf 'path "secret/data/opssquad/jwt"     { capabilities = ["read"] }\npath "secret/data/opssquad/llm"      { capabilities = ["read"] }\npath "secret/data/opssquad/webhooks" { capabilities = ["read"] }\n' | vault policy write opssquad-runtime -
+              printf 'path "secret/data/opssquad/jwt"     { capabilities = ["read"] }\npath "secret/data/opssquad/llm"      { capabilities = ["read"] }\npath "secret/data/opssquad/webhooks" { capabilities = ["read"] }\npath "secret/data/opssquad/integrations" { capabilities = ["read"] }\n' | vault policy write opssquad-runtime -
               printf 'path "secret/data/opssquad/jwt" { capabilities = ["read"] }\n' | vault policy write opssquad-bff -
 
               vault write auth/kubernetes/role/opssquad-runtime \
@@ -60,5 +70,8 @@ spec:
               vault kv put secret/opssquad/jwt secret="$JWT_SECRET"
               vault kv put secret/opssquad/llm anthropic_api_key="$ANTHROPIC_API_KEY" openai_api_key="$OPENAI_API_KEY"
               vault kv put secret/opssquad/webhooks github_secret="$GITHUB_WEBHOOK_SECRET" alertmanager_token="$ALERTMANAGER_WEBHOOK_TOKEN"
+              vault kv put secret/opssquad/integrations \
+                aws_access_key_id="$AWS_ACCESS_KEY_ID" aws_secret_access_key="$AWS_SECRET_ACCESS_KEY" aws_region="$AWS_REGION" \
+                slack_webhook_url="$SLACK_WEBHOOK_URL" pagerduty_api_token="$PAGERDUTY_API_TOKEN"
 
               echo "vault configured"

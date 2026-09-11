@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     terraform_dir: str = "terraform-demo"
     trivy_scan_path: str = "/app"
 
+    # cloud.cost_explorer/slack.post/pagerduty.read — empty by default (no
+    # usable safe self-contained target exists for these, unlike kubectl/
+    # terraform/trivy/docker/helm/argocd above); each tool fails closed with
+    # a clear error when unconfigured, same shape as ALERTMANAGER_WEBHOOK_TOKEN.
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_region: str = "us-east-1"
+    slack_webhook_url: str = ""
+    pagerduty_api_token: str = ""
+
     # Set only in k8s — empty here means "no Vault, use plain env vars"
     # (the docker-compose path, untouched).
     vault_addr: str = ""

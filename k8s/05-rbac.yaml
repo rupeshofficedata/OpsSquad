@@ -2,6 +2,9 @@
 # calls — read pods/logs, read+scale+restart deployments, scoped to the
 # opssquad namespace only. Matches the README's own stated principle:
 # "Every agent gets its own IAM role / kubeconfig — never one god credential."
+# secrets/services were added for the real helm.upgrade/rollback target
+# (k8s/charts/canary) — Helm stores release state as Secrets, and the
+# chart creates one Service. Still opssquad-namespace-only.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -19,7 +22,14 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale"]
-    verbs: ["get", "list", "patch", "update"]
+    # create/delete added for the real helm.upgrade/rollback target
+    # (k8s/charts/canary) — Helm creates the Deployment on first install
+    # and can delete it on rollback/uninstall, not just patch an existing
+    # one the way kubectl.restart/scale do.
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets", "services"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

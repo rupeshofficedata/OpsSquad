@@ -1,0 +1,9 @@
+# Real argocd.sync/argocd.rollback target — a dedicated namespace for a
+# minimal ArgoCD core-install (see 08-argocd-core-install.yaml). Kept
+# separate from opssquad so the heavier GitOps controller stack is
+# isolated from the rest of the app, and its own failure mode can't take
+# opssquad down.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd

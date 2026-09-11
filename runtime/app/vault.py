@@ -40,3 +40,13 @@ async def load_secrets_from_vault() -> None:
             webhooks = (await client.get("/v1/secret/data/opssquad/webhooks", headers=headers)).json()["data"]["data"]
             settings.github_webhook_secret = webhooks.get("github_secret", settings.github_webhook_secret)
             settings.alertmanager_webhook_token = webhooks.get("alertmanager_token", settings.alertmanager_webhook_token)
+
+            # Optional — empty in Vault by default. cloud.cost_explorer/
+            # slack.post/pagerduty.read (app/tools/real.py) each fail
+            # closed with a clear error if their own credential is unset.
+            integrations = (await client.get("/v1/secret/data/opssquad/integrations", headers=headers)).json()["data"]["data"]
+            settings.aws_access_key_id = integrations.get("aws_access_key_id", settings.aws_access_key_id)
+            settings.aws_secret_access_key = integrations.get("aws_secret_access_key", settings.aws_secret_access_key)
+            settings.aws_region = integrations.get("aws_region") or settings.aws_region
+            settings.slack_webhook_url = integrations.get("slack_webhook_url", settings.slack_webhook_url)
+            settings.pagerduty_api_token = integrations.get("pagerduty_api_token", settings.pagerduty_api_token)

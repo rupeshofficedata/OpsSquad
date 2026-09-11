@@ -14,6 +14,7 @@ import { router as authRouter } from "./routes/auth.js";
 import { router as chatRouter } from "./routes/chat.js";
 import { router as flightplansRouter } from "./routes/flightplans.js";
 import { router as meRouter } from "./routes/me.js";
+import { router as modelRouter } from "./routes/model.js";
 import { router as runsRouter } from "./routes/runs.js";
 
 const app = express();
@@ -27,6 +28,7 @@ app.get("/health", (_req, res) => res.json({ status: "ok", service: "opssquad-bf
 
 app.use("/api/auth", authRouter);
 app.use("/api/me", meRouter);
+app.use("/api/model", modelRouter);
 app.use("/api/agents", agentsRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/flightplans", flightplansRouter);

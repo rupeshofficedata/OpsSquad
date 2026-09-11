@@ -26,6 +26,14 @@ stringData:
   OPENAI_API_KEY: ""
   GITHUB_WEBHOOK_SECRET: ""
   ALERTMANAGER_WEBHOOK_TOKEN: "change-me-alertmanager-token"
+  # Optional real-tool credentials (cloud.cost_explorer/slack.post/
+  # pagerduty.read) — empty by default, same as ANTHROPIC/OPENAI above.
+  # Each tool fails closed with a clear error when unset.
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  SLACK_WEBHOOK_URL: ""
+  PAGERDUTY_API_TOKEN: ""
 ---
 # Vault's Kubernetes auth method validates a login JWT by calling the
 # TokenReview API — that requires Vault's own pod identity to hold the

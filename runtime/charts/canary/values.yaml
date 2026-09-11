@@ -1,0 +1,4 @@
+image:
+  repository: nginxdemos/hello
+  tag: latest
+replicas: 1

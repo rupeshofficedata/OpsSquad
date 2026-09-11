@@ -16,6 +16,14 @@ spec:
         - name: runtime
           image: opssquad/runtime:local
           imagePullPolicy: IfNotPresent
+          # Found by testing, not assumed: buildah (the real docker.build/
+          # docker.tag target) needs CAP_SYS_ADMIN to create its build
+          # namespace even running as root — plain `docker run` with no
+          # added capability fails with "unshare(CLONE_NEWUSER): Operation
+          # not permitted". One narrow capability, not `privileged: true`.
+          securityContext:
+            capabilities:
+              add: ["SYS_ADMIN"]
           ports:
             - containerPort: 8000
           env:

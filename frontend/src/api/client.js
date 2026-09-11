@@ -29,6 +29,8 @@ export const api = {
   me: () => request("/api/me"),
   updateModelPreference: (provider, model) =>
     request("/api/me/model", { method: "PATCH", body: JSON.stringify({ provider, model }) }),
+  getModelStatus: () => request("/api/model/status"),
+  startModel: () => request("/api/model/start", { method: "POST" }),
   listAgents: () => request("/api/agents"),
   chat: (prompt, env = "staging") =>
     request("/api/chat", { method: "POST", body: JSON.stringify({ prompt, env }) }),

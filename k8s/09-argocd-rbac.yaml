@@ -1,0 +1,28 @@
+# Cross-namespace grant for the real argocd.sync/argocd.rollback target —
+# get/patch only, only on the Application CRD, only in the argocd
+# namespace. The runtime ServiceAccount lives in opssquad; a RoleBinding
+# can reference a ServiceAccount from another namespace, so no second
+# identity is needed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: runtime-argocd-sync
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: runtime-argocd-sync
+  namespace: argocd
+subjects:
+  - kind: ServiceAccount
+    name: runtime
+    namespace: opssquad
+roleRef:
+  kind: Role
+  name: runtime-argocd-sync
+  apiGroup: rbac.authorization.k8s.io

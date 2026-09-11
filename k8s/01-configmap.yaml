@@ -22,4 +22,8 @@ data:
   # machine's llama-server (bound to 0.0.0.0:8080) from inside a pod.
   # `docker network inspect kind` confirms this per-machine; not portable.
   LOCAL_LLM_BASE_URL: "http://172.18.0.1:8080/v1"
+  # local-model-control/agent.py — run manually on the host, same bridge
+  # path as LOCAL_LLM_BASE_URL above. Backs the Chat page's model status
+  # indicator + "Start model" button.
+  MODEL_CONTROL_URL: "http://172.18.0.1:8081"
   VAULT_ADDR: "http://vault:8200"

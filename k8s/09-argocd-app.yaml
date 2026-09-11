@@ -1,0 +1,38 @@
+# core-install doesn't auto-create the "default" AppProject the way a full
+# ArgoCD install's UI/onboarding flow normally would — found by testing
+# (the Application below sat in an InvalidSpecError until this existed).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  sourceRepos: ["*"]
+  destinations:
+    - namespace: "*"
+      server: "*"
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+---
+# The real argocd.sync/argocd.rollback target. syncPolicy is deliberately
+# manual (no `automated:` block) — with auto-sync on, the app would always
+# already be in-sync and a real argocd.sync tool call would be a no-op.
+# The matching repo-credentials Secret is created by k8s/bootstrap.sh from
+# `gh auth token` at deploy time, never committed here (same pattern as
+# the Vault seed values).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-demo
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/rupeshofficedata/OpsSquad.git
+    targetRevision: HEAD
+    path: k8s/argocd-demo
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: opssquad
+  syncPolicy: {}

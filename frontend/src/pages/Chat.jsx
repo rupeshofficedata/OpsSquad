@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client.js";
 import { useAuth } from "../auth/AuthContext.jsx";
+
+const STATUS_DOT = { running: "bg-emerald-500", loading: "bg-amber-500", stopped: "bg-red-500" };
 
 export default function Chat() {
   const { user, updateUser } = useAuth();
@@ -11,6 +13,27 @@ export default function Chat() {
   const [busy, setBusy] = useState(false);
   const [modelSaving, setModelSaving] = useState(false);
   const [modelNameDraft, setModelNameDraft] = useState(user.model_name || "");
+  const [modelStatus, setModelStatus] = useState(null);
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    if (user.model_provider !== "local") return;
+    let cancelled = false;
+    const poll = () => api.getModelStatus().then((r) => { if (!cancelled) setModelStatus(r.state); }).catch(() => {});
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [user.model_provider]);
+
+  async function handleStartModel() {
+    setStarting(true);
+    try {
+      const r = await api.startModel();
+      setModelStatus(r.state);
+    } finally {
+      setStarting(false);
+    }
+  }
 
   async function handleProviderChange(provider) {
     setModelSaving(true);
@@ -64,13 +87,27 @@ export default function Chat() {
             <option value="local">Local (llama.cpp)</option>
           </select>
           {user.model_provider === "local" && (
-            <input
-              value={modelNameDraft}
-              onChange={(e) => setModelNameDraft(e.target.value)}
-              onBlur={handleModelNameBlur}
-              placeholder="model label, e.g. qwen2.5-coder:7b"
-              className="w-44 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
-            />
+            <>
+              <input
+                value={modelNameDraft}
+                onChange={(e) => setModelNameDraft(e.target.value)}
+                onBlur={handleModelNameBlur}
+                placeholder="model label, e.g. qwen2.5-coder:7b"
+                className="w-44 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
+              />
+              <span
+                className={`h-2.5 w-2.5 rounded-full ${STATUS_DOT[modelStatus] || "bg-slate-600"}`}
+                title={`model: ${modelStatus || "unknown"}`}
+              />
+              <span className="text-xs text-slate-400">{modelStatus || "unknown"}</span>
+              <button
+                onClick={handleStartModel}
+                disabled={modelStatus !== "stopped" || starting}
+                className="rounded-md border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800 disabled:opacity-40"
+              >
+                {starting ? "Starting…" : "Start model"}
+              </button>
+            </>
           )}
           <select
             value={env}

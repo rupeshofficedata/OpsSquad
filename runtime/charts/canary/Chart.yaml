@@ -1,0 +1,8 @@
+# Real helm.upgrade/helm.rollback target for the deploy/rollback agents —
+# same role terraform-demo/docker-demo play: a real, safe, stateless,
+# self-contained release, not a stub.
+apiVersion: v2
+name: canary
+description: Trivial, safe, restartable release — real helm.upgrade/rollback target
+version: 0.1.0
+appVersion: "1.0"

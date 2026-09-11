@@ -1,0 +1,15 @@
+# Real argocd.sync/argocd.rollback target — the ONE resource the
+# argocd-demo Application (k8s/09-argocd-app.yaml) owns exclusively.
+# Deliberately not the same resource k8s/charts/canary (Helm) manages, so
+# the two tools never fight over one object. `argocd.rollback` (see
+# app/tools/real.py) works by pointing the Application's
+# spec.source.targetRevision at the git commit before this file's `message`
+# last changed, then re-syncing — change this value in a real commit when
+# you want something for a live rollback test to actually revert.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-demo
+  namespace: opssquad
+data:
+  message: "hello from ArgoCD, synced by a real GitOps controller"

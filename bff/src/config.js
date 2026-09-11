@@ -11,5 +11,6 @@ export const config = {
   jwtAccessTtl: process.env.JWT_ACCESS_TTL || "15m",
   jwtRefreshTtl: process.env.JWT_REFRESH_TTL || "7d",
   runtimeUrl: process.env.RUNTIME_URL || "http://localhost:8000",
+  modelControlUrl: process.env.MODEL_CONTROL_URL || "http://localhost:8081",
   frontendOrigin: process.env.FRONTEND_ORIGIN || "http://localhost:5173",
 };
