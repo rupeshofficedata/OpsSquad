@@ -1,0 +1,169 @@
+# Prometheus was already running live in this cluster (applied by hand
+# earlier this session) but was never committed — reconstructed here so a
+# fresh cluster actually has it too, not just this one. Real target for
+# prometheus.query. Alertmanager is new: a real target for
+# alertmanager.read, and closes the incident-response loop for real —
+# Prometheus's rule below fires into it, which POSTs to opssquad's own
+# already-real /webhooks/alertmanager.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: opssquad
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opssquad-prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/proxy", "nodes/metrics", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opssquad-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: opssquad
+roleRef:
+  kind: ClusterRole
+  name: opssquad-prometheus
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: opssquad
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager:9093"]
+    scrape_configs:
+      - job_name: kubernetes-cadvisor
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: opssquad
+data:
+  # A real, continuously-evaluated rule — may rarely fire (honest: this
+  # is real infra, not a guaranteed-fire demo), which is the point: a
+  # genuine Prometheus -> Alertmanager -> webhook path exists, not a
+  # theater button.
+  demo.yml: |
+    groups:
+      - name: opssquad-demo
+        rules:
+          - alert: CadvisorTargetDown
+            expr: up{job="kubernetes-cadvisor"} == 0
+            for: 1m
+            labels: { severity: P2 }
+            annotations: { summary: "cadvisor scrape target is down" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: opssquad
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: prometheus }
+  template:
+    metadata:
+      labels: { app: prometheus }
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.55.1
+          args: ["--config.file=/etc/prometheus/prometheus.yml"]
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus }
+            - { name: rules, mountPath: /etc/prometheus/rules }
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config }
+        - name: rules
+          configMap: { name: prometheus-rules }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: opssquad
+spec:
+  selector: { app: prometheus }
+  ports:
+    - port: 9090
+      targetPort: 9090
+---
+# alertmanager.yml (the config itself, including the real webhook bearer
+# token) is generated as a Secret by k8s/bootstrap.sh at deploy time from
+# the same ALERTMANAGER_WEBHOOK_TOKEN already seeded into
+# opssquad-vault-seed — never committed here, same pattern as the ArgoCD
+# repo-credentials Secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: opssquad
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: alertmanager }
+  template:
+    metadata:
+      labels: { app: alertmanager }
+    spec:
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.27.0
+          args: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+          ports:
+            - containerPort: 9093
+          volumeMounts:
+            - { name: config, mountPath: /etc/alertmanager }
+      volumes:
+        - name: config
+          secret: { secretName: alertmanager-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: opssquad
+spec:
+  selector: { app: alertmanager }
+  ports:
+    - port: 9093
+      targetPort: 9093

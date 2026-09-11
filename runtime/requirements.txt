@@ -8,3 +8,6 @@ anthropic==0.34.2
 bcrypt==4.2.0
 httpx==0.27.2
 boto3==1.35.36
+ruff==0.7.0
+pytest==8.3.3
+croniter==3.0.3

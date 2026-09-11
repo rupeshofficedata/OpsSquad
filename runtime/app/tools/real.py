@@ -36,6 +36,7 @@ that every demo target is production infrastructure.
 import asyncio
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -426,6 +427,204 @@ class RealPagerdutyRead(Tool):
         })
 
 
+class RealGitDiff(Tool):
+    name = "git.diff"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        code, out, err = await _run("git", "-C", "git-demo", "diff", "HEAD~1", "HEAD")
+        if code != 0:
+            return ToolResult(ok=False, error=err[:500])
+        return ToolResult(ok=True, data={"diff": out[:2000], "real": True})
+
+
+class RealGitLog(Tool):
+    name = "git.log"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        code, out, err = await _run("git", "-C", "git-demo", "log", "--oneline", "-20")
+        if code != 0:
+            return ToolResult(ok=False, error=err[:500])
+        return ToolResult(ok=True, data={"commits": out.strip().splitlines(), "real": True})
+
+
+class RealSecretsScan(Tool):
+    name = "secrets.scan"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        # -r /dev/stdout fails under asyncio's subprocess pipes ("no such
+        # device or address") — found by testing. A real temp file avoids
+        # the special-device issue entirely.
+        report_path = "/tmp/gitleaks-report.json"
+        code, _, err = await _run(
+            "gitleaks", "detect", "--source", "git-demo", "-f", "json", "-r", report_path, "--exit-code", "0",
+            timeout=60.0,
+        )
+        if code != 0:
+            return ToolResult(ok=False, error=err[:500])
+        out = Path(report_path).read_text() if Path(report_path).exists() else ""
+        findings = json.loads(out) if out.strip() else []
+        secrets_found = [{"kind": f.get("RuleID"), "file": f.get("File"), "line": f.get("StartLine")} for f in findings]
+        return ToolResult(ok=True, data={"secrets_found": secrets_found, "real": True})
+
+
+class RealLintRun(Tool):
+    name = "lint.run"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        code, out, err = await _run("ruff", "check", "app", "--output-format", "json", timeout=30.0)
+        # ruff exits 1 when it finds warnings — that's a normal result, not a tool failure.
+        if code not in (0, 1):
+            return ToolResult(ok=False, error=err[:500])
+        warnings = json.loads(out) if out.strip() else []
+        return ToolResult(ok=True, data={"warnings": len(warnings), "real": True})
+
+
+class RealTestRun(Tool):
+    name = "test.run"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        code, out, err = await _run("python", "-m", "pytest", "app/tests", "-q", "--tb=no", timeout=60.0)
+        if code not in (0, 1):
+            return ToolResult(ok=False, error=err[:500] or out[:500])
+        match = re.search(r"(\d+) passed(?:, (\d+) failed)?|(\d+) failed", out)
+        passed = int(match.group(1)) if match and match.group(1) else 0
+        failed = int(match.group(2) or match.group(3) or 0) if match else 0
+        return ToolResult(ok=True, data={
+            "total": passed + failed, "passed": passed, "failed": failed, "real": True,
+        })
+
+
+class RealTestSelect(Tool):
+    name = "test.select"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        code, out, err = await _run("find", "app/tests", "-name", "test_*.py")
+        if code != 0:
+            return ToolResult(ok=False, error=err[:500])
+        return ToolResult(ok=True, data={"tests": out.strip().splitlines(), "real": True})
+
+
+class RealRegistryPush(Tool):
+    name = "registry.push"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        try:
+            tag = _safe_arg(kwargs.get("tag") or "opssquad-docker-demo:latest")
+        except UnsafeArgError as exc:
+            return ToolResult(ok=False, error=str(exc))
+        dest = f"registry:5000/{tag}"
+        code, _, err = await _run(
+            "buildah", "push", "--storage-driver=vfs", "--root", "/tmp/buildah",
+            "--tls-verify=false", tag, dest, timeout=60.0,
+        )
+        return ToolResult(ok=code == 0, data={"pushed_to": dest, "real": True} if code == 0 else None,
+                           error=None if code == 0 else err[:500])
+
+
+class RealRegistryPull(Tool):
+    name = "registry.pull"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        try:
+            tag = _safe_arg(kwargs.get("tag") or "opssquad-docker-demo:latest")
+        except UnsafeArgError as exc:
+            return ToolResult(ok=False, error=str(exc))
+        src = f"registry:5000/{tag}"
+        code, _, err = await _run(
+            "buildah", "pull", "--storage-driver=vfs", "--root", "/tmp/buildah",
+            "--tls-verify=false", src, timeout=60.0,
+        )
+        return ToolResult(ok=code == 0, data={"pulled_from": src, "real": True} if code == 0 else None,
+                           error=None if code == 0 else err[:500])
+
+
+class RealIacScan(Tool):
+    name = "iac.scan"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        code, out, err = await _run("trivy", "config", "--format", "json", "--quiet", "--", settings.terraform_dir, timeout=60.0)
+        if code != 0:
+            return ToolResult(ok=False, error=err[:500])
+        report = json.loads(out)
+        misconfigs = [
+            {"rule": m.get("Title"), "resource": m.get("ID")}
+            for result in (report.get("Results") or [])
+            for m in (result.get("Misconfigurations") or [])
+        ]
+        return ToolResult(ok=True, data={"misconfigurations": misconfigs, "real": True})
+
+
+class RealHttpSmokeTest(Tool):
+    name = "http.smoke_test"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        targets = ["http://runtime:8000/health", "http://bff:4000/health"]
+        failures = []
+        async with httpx.AsyncClient(timeout=5) as client:
+            for url in targets:
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code >= 400:
+                        failures.append(f"GET {url} -> {resp.status_code}")
+                except httpx.HTTPError as exc:
+                    failures.append(f"GET {url} -> {exc}")
+        return ToolResult(ok=True, data={
+            "ok": not failures, "checks_run": len(targets), "failures": failures, "real": True,
+        })
+
+
+class RealPrometheusQuery(Tool):
+    name = "prometheus.query"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        # No app-level HTTP error-rate metric exists in this scaffold
+        # (cadvisor only exposes container cpu/memory/network) — verify.py
+        # thresholds on "error_rate" though, so the real, honest signal is
+        # the fraction of scraped targets that are actually down, not a
+        # fabricated HTTP metric. p99_latency_ms stays real-absent (None)
+        # rather than invented.
+        query = kwargs.get("query") or 'up{job="kubernetes-cadvisor"}'
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get("http://prometheus:9090/api/v1/query", params={"query": query})
+        except httpx.HTTPError as exc:
+            return ToolResult(ok=False, error=str(exc)[:500])
+        if resp.status_code >= 400:
+            return ToolResult(ok=False, error=f"Prometheus returned {resp.status_code}: {resp.text[:200]}")
+        result = resp.json().get("data", {}).get("result", [])
+        total = len(result)
+        down = sum(1 for r in result if r.get("value", [None, "1"])[1] == "0")
+        error_rate = round(down / total, 4) if total else 0.0
+        return ToolResult(ok=True, data={
+            "query": query, "error_rate": error_rate, "p99_latency_ms": None,
+            "series_returned": total, "real": True,
+        })
+
+
+class RealAlertmanagerRead(Tool):
+    name = "alertmanager.read"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get("http://alertmanager:9093/api/v2/alerts")
+        except httpx.HTTPError as exc:
+            return ToolResult(ok=False, error=str(exc)[:500])
+        if resp.status_code >= 400:
+            return ToolResult(ok=False, error=f"Alertmanager returned {resp.status_code}: {resp.text[:200]}")
+        alerts = resp.json()
+        firing = [a for a in alerts if a.get("status", {}).get("state") == "active"]
+        first = firing[0] if firing else (alerts[0] if alerts else {})
+        labels = first.get("labels", {})
+        return ToolResult(ok=True, data={
+            "severity": labels.get("severity", "unknown"),
+            "alertname": labels.get("alertname", "none"),
+            "summary": first.get("annotations", {}).get("summary", ""),
+            "firing_count": len(firing),
+            "real": True,
+        })
+
+
 REAL_TOOLS: dict[str, Tool] = {
     tool.name: tool
     for tool in (
@@ -435,5 +634,9 @@ REAL_TOOLS: dict[str, Tool] = {
         RealHelmUpgrade(), RealHelmRollback(),
         RealArgocdSync(), RealArgocdRollback(),
         RealCostExplorer(), RealSlackPost(), RealPagerdutyRead(),
+        RealGitDiff(), RealGitLog(), RealSecretsScan(), RealLintRun(),
+        RealTestRun(), RealTestSelect(),
+        RealRegistryPush(), RealRegistryPull(), RealIacScan(),
+        RealHttpSmokeTest(), RealPrometheusQuery(), RealAlertmanagerRead(),
     )
 }

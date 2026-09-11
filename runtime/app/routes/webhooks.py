@@ -27,8 +27,28 @@ async def github_webhook(request: Request, x_hub_signature_256: str | None = Hea
         raise HTTPException(401, "invalid signature")
 
     payload = await request.json()
-    # A real implementation would map push/PR events to a `ship-to-prod` run.
-    return {"received": True, "event": x_github_event, "repo": payload.get("repository", {}).get("full_name")}
+    repo_name = payload.get("repository", {}).get("full_name")
+
+    # Only a push to main/master maps to a real run — a PR-opened event
+    # etc. has no corresponding Flightplan to trigger, so it's honestly
+    # just acknowledged rather than forced into ship-to-prod.
+    if x_github_event == "push" and payload.get("ref") in ("refs/heads/main", "refs/heads/master"):
+        flightplan = await repo.get_flightplan("ship-to-prod")
+        commit = payload.get("after")
+        if flightplan is not None and commit:
+            inputs = {"repo": repo_name, "commit": commit}
+            # Same admin-equivalent trust as the alertmanager webhook —
+            # GitHub isn't a human user either.
+            run_id = await repo.create_run(
+                kind="flightplan", flightplan_id=flightplan["id"], triggered_by=None, inputs=inputs
+            )
+            await repo.write_audit_log(None, "flightplan.execute", "ship-to-prod", {"run_id": run_id, "source": "github"})
+            asyncio.create_task(run_in_background(
+                run_id, execute_flightplan(run_id, flightplan, inputs, user_role="admin")
+            ))
+            return {"received": True, "event": x_github_event, "repo": repo_name, "triggered": True, "run_id": run_id}
+
+    return {"received": True, "event": x_github_event, "repo": repo_name, "triggered": False}
 
 
 @router.post("/alertmanager")

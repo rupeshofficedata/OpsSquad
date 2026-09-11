@@ -95,6 +95,38 @@ stringData:
 EOF
 k apply -f "$K8S_DIR/09-argocd-app.yaml"
 
+log "Installing registry (real registry.push/pull target)"
+k apply -f "$K8S_DIR/12-registry.yaml"
+
+log "Installing Prometheus + Alertmanager (real prometheus.query/alertmanager.read target)"
+# alertmanager.yml holds the real webhook bearer token — generated here
+# from the same value already seeded into opssquad-vault-seed, never
+# committed as plain text (same pattern as the ArgoCD repo-creds Secret).
+ALERTMANAGER_TOKEN="$(k -n "$NAMESPACE" get secret opssquad-vault-seed -o jsonpath='{.data.ALERTMANAGER_WEBHOOK_TOKEN}' | base64 -d)"
+cat <<EOF | k apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-config
+  namespace: $NAMESPACE
+stringData:
+  alertmanager.yml: |
+    route:
+      receiver: opssquad
+      group_by: ['alertname']
+    receivers:
+      - name: opssquad
+        webhook_configs:
+          - url: http://runtime:8000/webhooks/alertmanager
+            http_config:
+              authorization:
+                credentials: $ALERTMANAGER_TOKEN
+EOF
+k apply -f "$K8S_DIR/13-observability.yaml"
+k -n "$NAMESPACE" rollout status deployment/registry --timeout=60s
+k -n "$NAMESPACE" rollout status deployment/prometheus --timeout=60s
+k -n "$NAMESPACE" rollout status deployment/alertmanager --timeout=60s
+
 log "Syncing db/migrations + db/seed.sql into a ConfigMap and running the migration Job"
 k -n "$NAMESPACE" create configmap opssquad-sql \
   --from-file=001_init.sql="$ROOT_DIR/db/migrations/001_init.sql" \

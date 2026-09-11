@@ -37,6 +37,14 @@ async def get_flightplan(slug: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+async def list_scheduled_flightplans() -> list[dict[str, Any]]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM flightplans WHERE definition->'trigger'->>'type' = 'schedule'"
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_flightplan_by_id(flightplan_id: str) -> dict[str, Any] | None:
     pool = get_pool()
     row = await pool.fetchrow("SELECT * FROM flightplans WHERE id = $1", flightplan_id)
