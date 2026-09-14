@@ -15,12 +15,17 @@ const POD_STATUS_DOT = {
 // it sit buried in a JSON dump.
 function ResourceCards({ items }) {
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
       {items.map((it) => (
         <div key={it.name} className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1.5 text-xs">
           <span className={`h-2 w-2 shrink-0 rounded-full ${POD_STATUS_DOT[it.status] || "bg-slate-600"}`} />
           <span className="truncate text-slate-200" title={it.name}>{it.name}</span>
-          <span className="ml-auto shrink-0 text-slate-500">{it.status}</span>
+          <span className="ml-auto shrink-0 space-x-2 text-slate-500">
+            {it.ready != null && <span>{it.ready}</span>}
+            <span>{it.status}</span>
+            {it.restarts != null && <span>{it.restarts} restarts</span>}
+            {it.age && <span>{it.age}</span>}
+          </span>
         </div>
       ))}
     </div>

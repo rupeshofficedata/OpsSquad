@@ -36,6 +36,7 @@ that every demo target is production infrastructure.
 import asyncio
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,41 @@ def _resolve_target(kwargs: dict[str, Any], default: str) -> Any:
     return default
 
 
+def _human_age(creation_timestamp: str | None) -> str | None:
+    if not creation_timestamp:
+        return None
+    created = datetime.fromisoformat(creation_timestamp.replace("Z", "+00:00"))
+    seconds = int((datetime.now(timezone.utc) - created).total_seconds())
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    days, hours = divmod(hours, 24)
+    return f"{days}d{hours}h" if hours else f"{days}d"
+
+
+def _summarize_k8s_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Same columns real `kubectl get pods` shows — a Pod's containerStatuses
+    give ready count + restart count; other resource kinds (Deployments,
+    Services, ...) just won't have that field, and fall back to None."""
+    container_statuses = item.get("status", {}).get("containerStatuses")
+    ready = restarts = None
+    if container_statuses is not None:
+        ready = f"{sum(1 for c in container_statuses if c.get('ready'))}/{len(container_statuses)}"
+        restarts = sum(c.get("restartCount", 0) for c in container_statuses)
+    return {
+        "name": item.get("metadata", {}).get("name"),
+        "status": item.get("status", {}).get("phase") or item.get("status", {}).get("readyReplicas"),
+        "ready": ready,
+        "restarts": restarts,
+        "age": _human_age(item.get("metadata", {}).get("creationTimestamp")),
+    }
+
+
 class RealKubectlGet(Tool):
     name = "kubectl.get"
 
@@ -122,14 +158,11 @@ class RealKubectlGet(Tool):
             # a *List — genuinely enumerate it instead of silently
             # returning 0/0 by assuming the single-object
             # .spec.replicas/.status.readyReplicas shape below, which a
-            # List response never has.
-            items = [
-                {
-                    "name": i.get("metadata", {}).get("name"),
-                    "status": i.get("status", {}).get("phase") or i.get("status", {}).get("readyReplicas"),
-                }
-                for i in obj.get("items", [])
-            ]
+            # List response never has. Same columns real `kubectl get
+            # pods` shows (NAME/READY/STATUS/RESTARTS/AGE) — found by
+            # testing that name+status alone wasn't actually what "list
+            # pods" means to a user comparing it against the real CLI.
+            items = [_summarize_k8s_item(i) for i in obj.get("items", [])]
             return ToolResult(ok=True, data={"target": target, "items": items, "count": len(items), "real": True})
 
         return ToolResult(ok=True, data={
