@@ -61,11 +61,17 @@ k -n "$NAMESPACE" rollout status deployment/redis --timeout=60s
 k -n "$NAMESPACE" rollout status deployment/vault --timeout=60s
 
 log "Configuring Vault (Kubernetes auth, policies, secrets)"
-k -n "$NAMESPACE" delete job opssquad-vault-init --ignore-not-found
+# A CronJob (runs every 2 minutes), not a one-shot Job — dev-mode Vault is
+# in-memory, so it loses this config on any restart; the recurring,
+# idempotent run self-heals that automatically instead of needing a human
+# to notice runtime/bff crash-looping and rerun this by hand. Trigger one
+# immediate run here for first-time setup.
 k apply -f "$K8S_DIR/07-vault-init-job.yaml"
-if ! k -n "$NAMESPACE" wait --for=condition=complete job/opssquad-vault-init --timeout=60s; then
+k -n "$NAMESPACE" delete job opssquad-vault-init-bootstrap --ignore-not-found
+k -n "$NAMESPACE" create job opssquad-vault-init-bootstrap --from=cronjob/opssquad-vault-init
+if ! k -n "$NAMESPACE" wait --for=condition=complete job/opssquad-vault-init-bootstrap --timeout=60s; then
   log "Vault init job failed — logs:"
-  k -n "$NAMESPACE" logs job/opssquad-vault-init
+  k -n "$NAMESPACE" logs job/opssquad-vault-init-bootstrap
   exit 1
 fi
 
