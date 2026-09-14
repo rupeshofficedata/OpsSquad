@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../api/client.js";
+import { api, runStreamUrl } from "../api/client.js";
 import { useAuth } from "../auth/AuthContext.jsx";
+
+const TERMINAL_STATUSES = new Set(["success", "failed", "aborted"]);
 
 const STATUS_DOT = { running: "bg-emerald-500", loading: "bg-amber-500", stopped: "bg-red-500" };
 
@@ -70,30 +72,44 @@ function FormattedText({ text }) {
   return <div className="space-y-1.5">{blocks}</div>;
 }
 
-// Every tool call an agent made this run (name, exact input args, raw
-// result) — lets you verify a step actually did the right thing instead of
-// trusting the summary text (e.g. confirm kubectl.get really got called
-// with target: "pods", not silently defaulted to something else).
-function StepTrace({ toolCalls }) {
+// Live, always-visible trace of the whole tool-use loop, one card per
+// round exactly as it was persisted (see executor.py's on_step / routes/
+// chat.py's _execute_chat): the model's reasoning for that round, then
+// whatever tool call(s) it issued and their real result — not just a
+// flattened final summary, so you can watch input -> model output -> tool
+// execution -> result for every round, live, as run_steps rows arrive over
+// the WS stream.
+function LiveSteps({ steps }) {
+  // The final row (see _execute_chat in routes/chat.py) carries only the
+  // finished output/status, no reasoning/tool_calls — every round was
+  // already shown live above it. Skip it here so it isn't a blank card.
+  const rounds = steps.filter((s) => s.reasoning || s.tool_calls?.length > 0);
   return (
-    <details className="mt-2">
-      <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-400">
-        Steps ({toolCalls.length})
-      </summary>
-      <div className="mt-1.5 space-y-1.5">
-        {toolCalls.map((tc, i) => (
-          <details key={i} className="rounded border border-slate-700 bg-slate-950/50 px-2 py-1.5 text-xs">
-            <summary className="cursor-pointer text-slate-300">
-              {tc.result?.ok === false ? "❌" : "✅"} <span className="font-mono">{tc.tool}</span>
-            </summary>
-            <div className="mt-1.5 space-y-1">
-              <div><span className="text-slate-500">input: </span><code className="text-indigo-300">{JSON.stringify(tc.input)}</code></div>
-              <div><span className="text-slate-500">output: </span><code className="text-slate-300">{JSON.stringify(tc.result)}</code></div>
+    <div className="space-y-1.5">
+      {rounds.map((s, idx) => (
+        <div key={s.id || idx} className="rounded-md border border-slate-700 bg-slate-900/40 p-2 text-xs">
+          <div className="mb-1 flex items-center gap-1.5 text-slate-500">
+            <span>Round {idx + 1}</span>
+            {s.status === "running" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />}
+          </div>
+          {s.reasoning && <p className="mb-1 whitespace-pre-wrap text-slate-300">{s.reasoning}</p>}
+          {s.tool_calls?.length > 0 && (
+            <div className="space-y-1">
+              {s.tool_calls.map((tc, j) => (
+                <div key={j} className="rounded border border-slate-700 bg-slate-950/50 px-2 py-1">
+                  <div>
+                    {tc.result?.ok === false ? "❌" : "✅"}{" "}
+                    <span className="font-mono text-indigo-300">{tc.tool}</span>
+                    <span className="text-slate-500">({JSON.stringify(tc.input)})</span>
+                  </div>
+                  <div className="mt-0.5 text-slate-400">→ {JSON.stringify(tc.result?.data ?? tc.result?.error)}</div>
+                </div>
+              ))}
             </div>
-          </details>
-        ))}
-      </div>
-    </details>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -142,7 +158,9 @@ export default function Chat() {
   const [prompt, setPrompt] = useState("");
   const [env, setEnv] = useState("staging");
   const [history, setHistory] = useState([]);
-  const [busy, setBusy] = useState(false);
+  const [runsById, setRunsById] = useState({});
+  const [pendingCount, setPendingCount] = useState(0);
+  const busy = pendingCount > 0;
   const [modelSaving, setModelSaving] = useState(false);
   const [modelNameDraft, setModelNameDraft] = useState(user.model_name || "");
   const [modelStatus, setModelStatus] = useState(null);
@@ -196,34 +214,66 @@ export default function Chat() {
     }
   }
 
+  // POST /chat and /reply now background the whole tool-use loop and
+  // return {status:"queued", run_id} right away — this opens the same WS
+  // run-stream RunDetail.jsx already uses to watch it live, round by round,
+  // instead of blocking on one big response at the end.
+  async function subscribeToRun(runId) {
+    setPendingCount((c) => c + 1);
+    const url = await runStreamUrl(runId);
+    const ws = new WebSocket(url);
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.error) {
+        setPendingCount((c) => Math.max(0, c - 1));
+        return;
+      }
+      setRunsById((r) => ({ ...r, [runId]: data }));
+      if (TERMINAL_STATUSES.has(data.run.status) || data.run.status === "awaiting_user_input") {
+        setPendingCount((c) => Math.max(0, c - 1));
+      }
+    };
+    ws.onerror = () => setPendingCount((c) => Math.max(0, c - 1));
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     if (!prompt.trim()) return;
-    setBusy(true);
     const mine = { role: "user", text: prompt };
     setHistory((h) => [...h, mine]);
     setPrompt("");
     try {
-      const result = await api.chat(mine.text, env);
-      setHistory((h) => [...h, { role: "agent", result }]);
+      const res = await api.chat(mine.text, env);
+      setHistory((h) => [...h, { role: "agent", runId: res.run_id, agent: res.agent }]);
+      if (res.status === "queued") {
+        subscribeToRun(res.run_id);
+      } else {
+        // awaiting_approval — nothing running, no stream to open.
+        setRunsById((r) => ({ ...r, [res.run_id]: { run: { status: res.status }, steps: [] } }));
+      }
     } catch (err) {
       setHistory((h) => [...h, { role: "error", text: err.message }]);
-    } finally {
-      setBusy(false);
     }
   }
 
   async function handleReply(runId, index, replyText) {
     setAnsweredIndices((s) => new Set(s).add(index));
-    setBusy(true);
     setHistory((h) => [...h, { role: "user", text: replyText }]);
+    setPendingCount((c) => c + 1);
     try {
-      const result = await api.replyToChat(runId, replyText);
-      setHistory((h) => [...h, { role: "agent", result }]);
+      await api.replyToChat(runId, replyText);
+      // The WS for this runId is still open (the stream only closes on a
+      // terminal status, and awaiting_user_input isn't one) — it'll pick
+      // up the resumed rounds automatically, no need to resubscribe.
+      // ponytail: a poll tick between this call and the backend actually
+      // flipping status to 'running' can still see the old
+      // 'awaiting_user_input' and decrement pendingCount early — Send
+      // re-enables a couple seconds before the reply is truly done. Fix if
+      // that's ever more than cosmetic: track per-runId pending state keyed
+      // off a status transition, not a raw count.
     } catch (err) {
+      setPendingCount((c) => Math.max(0, c - 1));
       setHistory((h) => [...h, { role: "error", text: err.message }]);
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -296,57 +346,50 @@ export default function Chat() {
           <div key={i} className="space-y-1">
             {m.role === "user" && <p className="font-medium text-indigo-300">You: {m.text}</p>}
             {m.role === "error" && <p className="text-red-400">Error: {m.text}</p>}
-            {m.role === "agent" && (
-              <div className="rounded-md bg-slate-800 p-3 text-sm">
-                <p className="mb-1 text-slate-400">
-                  🧭 Matched agent → <span className="text-slate-200">{m.result.agent}</span>
-                  {m.result.run_id && (
+            {m.role === "agent" && (() => {
+              const data = runsById[m.runId];
+              const status = data?.run?.status;
+              const steps = data?.steps || [];
+              const lastStep = steps[steps.length - 1];
+              const allToolCalls = steps.flatMap((s) => s.tool_calls || []);
+              const items = allToolCalls.flatMap((tc) => tc.result?.data?.items || []);
+              const summary = lastStep?.output?.summary;
+              const question = lastStep?.output?.question;
+
+              return (
+                <div className="rounded-md bg-slate-800 p-3 text-sm">
+                  <p className="mb-1 text-slate-400">
+                    🧭 Matched agent → <span className="text-slate-200">{m.agent}</span>
+                    {" · "}
+                    <Link to={`/runs/${m.runId}`} className="text-indigo-400 hover:underline">view run</Link>
+                    {status && <span className="ml-2 text-xs uppercase text-slate-500">{status}</span>}
+                  </p>
+                  {!data ? (
+                    <p className="text-slate-500">Starting…</p>
+                  ) : status === "awaiting_approval" ? (
+                    <p className="text-amber-400">This is a mutating action in prod — awaiting admin approval.</p>
+                  ) : (
                     <>
-                      {" · "}
-                      <Link to={`/runs/${m.result.run_id}`} className="text-indigo-400 hover:underline">
-                        view run
-                      </Link>
+                      {steps.length > 0 && <LiveSteps steps={steps} />}
+                      <div className="mt-2 space-y-2">
+                        {items.length > 0 && <ResourceCards items={items} />}
+                        {typeof summary === "string" && summary.trim() ? (
+                          <FormattedText text={summary} />
+                        ) : (
+                          !items.length && lastStep?.output && <KeyValueCards data={lastStep.output} />
+                        )}
+                      </div>
+                      {status === "awaiting_user_input" && !answeredIndices.has(i) && (
+                        <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-950/20 p-2">
+                          <p className="text-sm text-amber-400">❓ {question}</p>
+                          <ReplyBox busy={busy} onReply={(text) => handleReply(m.runId, i, text)} />
+                        </div>
+                      )}
                     </>
                   )}
-                </p>
-                {m.result.status === "awaiting_approval" ? (
-                  <p className="text-amber-400">
-                    This is a mutating action in prod — awaiting admin approval.
-                  </p>
-                ) : (
-                  <>
-                    {(() => {
-                      const items = (m.result.tool_calls || [])
-                        .flatMap((tc) => tc.result?.data?.items || []);
-                      const summary = m.result.output?.summary;
-                      return (
-                        <div className="space-y-2">
-                          {items.length > 0 && <ResourceCards items={items} />}
-                          {typeof summary === "string" && summary.trim() ? (
-                            <FormattedText text={summary} />
-                          ) : (
-                            !items.length && m.result.output && <KeyValueCards data={m.result.output} />
-                          )}
-                        </div>
-                      );
-                    })()}
-                    {m.result.tool_calls?.length > 0 && <StepTrace toolCalls={m.result.tool_calls} />}
-                    {m.result.reasoning && (
-                      <details className="mt-2">
-                        <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-400">Reasoning</summary>
-                        <p className="mt-1 whitespace-pre-wrap text-xs text-slate-500">{m.result.reasoning}</p>
-                      </details>
-                    )}
-                    {m.result.status === "awaiting_user_input" && !answeredIndices.has(i) && (
-                      <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-950/20 p-2">
-                        <p className="text-sm text-amber-400">❓ {m.result.question}</p>
-                        <ReplyBox busy={busy} onReply={(text) => handleReply(m.result.run_id, i, text)} />
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
+                </div>
+              );
+            })()}
           </div>
         ))}
       </div>

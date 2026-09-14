@@ -19,7 +19,7 @@ users.model_provider) that decides how their agent runs execute:
 import json
 import re
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -64,6 +64,12 @@ def build_resume_messages(model_provider: str, messages: list[dict[str, Any]], r
     return messages + [{"role": "tool", "tool_call_id": call["id"], "content": reply}]
 
 
+# Called after each tool-use round with (that round's reasoning text, that
+# round's tool calls) — lets a caller (routes/chat.py) persist/stream
+# progress live instead of only seeing the final aggregated result.
+OnStep = Callable[[str, list[dict[str, Any]]], Awaitable[None]]
+
+
 async def run_agent(
     agent: dict[str, Any],
     params: dict[str, Any],
@@ -72,6 +78,7 @@ async def run_agent(
     tool_call_mode: str = "lenient",
     allow_ask_user: bool = False,
     history: list[dict[str, Any]] | None = None,
+    on_step: OnStep | None = None,
 ) -> dict[str, Any]:
     """agent: a row from the `agents` table (as dict). params: caller-supplied args.
 
@@ -80,6 +87,7 @@ async def run_agent(
     tool_calls field, same rule Claude already follows.
     allow_ask_user / history: see ASK_USER_TOOL_NAME above and
     routes/chat.py's POST /chat + POST /chat/{run_id}/reply.
+    on_step: see OnStep above.
     """
     start = time.monotonic()
     tool_names: list[str] = agent["tools"] if isinstance(agent["tools"], list) else []
@@ -89,7 +97,7 @@ async def run_agent(
     if model_provider == "local":
         try:
             output, reasoning, tool_calls, asked_question, messages_out = await _run_with_local_llm(
-                agent, params, tool_names, model_name, tool_call_mode, allow_ask_user, history,
+                agent, params, tool_names, model_name, tool_call_mode, allow_ask_user, history, on_step,
             )
             status = "success"  # same caveat as Claude below — we don't parse free text for pass/fail
         except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
@@ -101,7 +109,7 @@ async def run_agent(
             reasoning = f"Local LLM at {settings.local_llm_base_url} failed ({exc}) — ran simulated instead. {reasoning}"
     elif model_provider == "anthropic" and settings.anthropic_api_key:
         output, reasoning, tool_calls, asked_question, messages_out = await _run_with_claude(
-            agent, params, tool_names, model_name, allow_ask_user, history,
+            agent, params, tool_names, model_name, allow_ask_user, history, on_step,
         )
         status = "success"  # Claude reasons freely over the tools; we don't parse its text for pass/fail
     else:
@@ -155,7 +163,7 @@ async def _run_simulated(
 
 async def _run_with_claude(
     agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None,
-    allow_ask_user: bool = False, history: list[dict[str, Any]] | None = None,
+    allow_ask_user: bool = False, history: list[dict[str, Any]] | None = None, on_step: "OnStep | None" = None,
 ) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None, list[dict[str, Any]]]:
     import anthropic
 
@@ -186,12 +194,15 @@ async def _run_with_claude(
         )
 
         text_blocks = [b.text for b in response.content if b.type == "text"]
+        round_text = "\n".join(text_blocks)
         if text_blocks:
-            reasoning_parts.append("\n".join(text_blocks))
-            final_text = "\n".join(text_blocks)
+            reasoning_parts.append(round_text)
+            final_text = round_text
 
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
         if not tool_use_blocks:
+            if on_step:
+                await on_step(round_text, [])
             break
 
         # Stored as plain dicts (not the SDK's pydantic content-block
@@ -203,8 +214,11 @@ async def _run_with_claude(
         ask_block = next((b for b in tool_use_blocks if b.name == ASK_USER_TOOL_NAME), None)
         if ask_block:
             asked_question = (ask_block.input or {}).get("question", "")
+            if on_step:
+                await on_step(round_text, [])
             break
 
+        round_tool_calls: list[dict[str, Any]] = []
         tool_results = []
         for block in tool_use_blocks:
             try:
@@ -214,11 +228,15 @@ async def _run_with_claude(
             except KeyError:
                 result_payload = {"ok": False, "error": f"tool '{block.name}' not registered"}
 
-            tool_calls.append({"tool": block.name, "input": block.input, "result": result_payload})
+            entry = {"tool": block.name, "input": block.input, "result": result_payload}
+            tool_calls.append(entry)
+            round_tool_calls.append(entry)
             tool_results.append(
                 {"type": "tool_result", "tool_use_id": block.id, "content": str(result_payload)}
             )
         messages.append({"role": "user", "content": tool_results})
+        if on_step:
+            await on_step(round_text, round_tool_calls)
 
     return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, messages
 
@@ -341,6 +359,7 @@ def _extract_content_tool_calls(content: str) -> list[dict[str, Any]]:
 async def _run_with_local_llm(
     agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None,
     tool_call_mode: str = "lenient", allow_ask_user: bool = False, history: list[dict[str, Any]] | None = None,
+    on_step: "OnStep | None" = None,
 ) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None, list[dict[str, Any]]]:
     """Same tool-use loop as Claude, against an OpenAI-compatible
     /chat/completions endpoint (llama-server, Ollama, vLLM, ...). The wire
@@ -394,6 +413,7 @@ async def _run_with_local_llm(
             )
             resp.raise_for_status()
             message = resp.json()["choices"][0]["message"]
+            round_text = message.get("content") or ""
 
             if message.get("content"):
                 reasoning_parts.append(message["content"])
@@ -427,6 +447,8 @@ async def _run_with_local_llm(
                     message = {**message, "tool_calls": calls}
             if not calls:
                 stopped_cleanly = True
+                if on_step:
+                    await on_step(round_text, [])
                 break
 
             if lenient:
@@ -438,6 +460,8 @@ async def _run_with_local_llm(
                 signatures = {call["function"]["name"] + "|" + (call["function"].get("arguments") or "") for call in calls}
                 if signatures <= seen_call_signatures:
                     stopped_cleanly = True
+                    if on_step:
+                        await on_step(round_text, [])
                     break
                 seen_call_signatures |= signatures
 
@@ -449,8 +473,11 @@ async def _run_with_local_llm(
                     asked_question = json.loads(ask_call["function"].get("arguments") or "{}").get("question", "")
                 except json.JSONDecodeError:
                     asked_question = ""
+                if on_step:
+                    await on_step(round_text, [])
                 break
 
+            round_tool_calls: list[dict[str, Any]] = []
             for call in calls:
                 name = call["function"]["name"]
                 try:
@@ -465,8 +492,12 @@ async def _run_with_local_llm(
                 except KeyError:
                     result_payload = {"ok": False, "error": f"tool '{name}' not registered"}
 
-                tool_calls.append({"tool": name, "input": call_args, "result": result_payload})
+                entry = {"tool": name, "input": call_args, "result": result_payload}
+                tool_calls.append(entry)
+                round_tool_calls.append(entry)
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(result_payload)})
+            if on_step:
+                await on_step(round_text, round_tool_calls)
 
     if lenient:
         # A "clean" stop isn't always a real answer — observed live: the
@@ -482,5 +513,13 @@ async def _run_with_local_llm(
             final_text = f"Model did not produce a final summary after {MAX_TOOL_ITERATIONS} tool-call rounds. Real tool results:\n" + "\n".join(
                 f"- {tc['tool']}({tc['input']}) -> {tc['result'].get('data') or tc['result'].get('error')}" for tc in tool_calls
             )
+    elif not tool_calls and _extract_content_tool_calls(final_text):
+        # Strict mode's whole point is to ignore a call the model only wrote
+        # as text — but silently returning that text as if it were a real
+        # answer looks like "the tool ran and this is empty" rather than
+        # "nothing ran." Flag it plainly instead (observed live: local
+        # models essentially always write calls this way, never the real
+        # structured field, so this fires often under strict mode).
+        final_text += "\n\n⚠️ Model tried to call a tool as plain text, not a real structured tool call — strict mode ignored it. Nothing was executed. Switch to lenient mode, or use Claude, if you want this to actually run."
 
     return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, messages

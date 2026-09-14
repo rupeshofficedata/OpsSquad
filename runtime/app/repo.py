@@ -73,13 +73,14 @@ async def create_run(
 
 
 async def mark_run_running(run_id: str) -> None:
-    """Flips a run from 'queued' or 'awaiting_approval' to 'running' right as
-    its background task actually starts executing steps. No-ops (via the
-    WHERE guard) if the run was aborted in the gap between being queued and
-    the task getting scheduled."""
+    """Flips a run from 'queued', 'awaiting_approval', or 'awaiting_user_input'
+    (chat resuming from an ask_user pause) to 'running' right as its
+    background task actually starts executing steps. No-ops (via the WHERE
+    guard) if the run was aborted in the gap between being queued and the
+    task getting scheduled."""
     pool = get_pool()
     await pool.execute(
-        "UPDATE runs SET status = 'running' WHERE id = $1 AND status IN ('queued', 'awaiting_approval')",
+        "UPDATE runs SET status = 'running' WHERE id = $1 AND status IN ('queued', 'awaiting_approval', 'awaiting_user_input')",
         run_id,
     )
 

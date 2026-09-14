@@ -1,35 +1,61 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from app import repo
 from app.models import ChatReplyRequest, ChatRequest
 from app.orchestrator.executor import build_resume_messages, run_agent
+from app.orchestrator.graph import run_in_background
 from app.orchestrator.router import classify
 from app.security import User, current_user, role_at_least
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-async def _run_and_record(
+async def _execute_chat(
     run_id: str, agent: dict, params: dict, user_id: str,
     model_provider: str, model_name: str | None, tool_call_mode: str,
     history: list | None = None,
-) -> dict:
-    """Runs the agent (fresh or resumed from a prior ask_user pause),
-    records the step + finishes/re-pauses the run. Shared by POST /chat and
-    POST /chat/{run_id}/reply so both stay in sync. allow_ask_user=True
-    always — both are chat-originated, the only run kind that gate covers
-    (see ASK_USER_TOOL_NAME in executor.py)."""
+) -> str:
+    """Runs the agent (fresh or resumed from a prior ask_user pause) as a
+    background task — see POST /chat and POST /chat/{run_id}/reply, both of
+    which return immediately with {"status": "queued", "run_id": ...} and
+    let the caller watch progress over the run-stream WS (same one
+    RunDetail.jsx already uses for Flightplan runs). Each tool-use round is
+    persisted as its own run_steps row (via on_step) as it happens, not just
+    the final aggregated result, so that stream actually has something to
+    show live: user input -> model reasoning -> tool call -> result, per
+    round, not one blob at the end."""
+    await repo.mark_run_running(run_id)
+    step_order = await repo.count_run_steps(run_id)
+
+    async def on_step(reasoning: str, tool_calls: list[dict]) -> None:
+        nonlocal step_order
+        await repo.add_run_step(
+            run_id, step_order, agent["slug"], "running",
+            reasoning=reasoning or None, tool_calls=tool_calls or None,
+        )
+        step_order += 1
+
     result = await run_agent(
         agent, params, model_provider=model_provider, model_name=model_name,
-        tool_call_mode=tool_call_mode, allow_ask_user=True, history=history,
+        tool_call_mode=tool_call_mode, allow_ask_user=True, history=history, on_step=on_step,
     )
-    step_order = await repo.count_run_steps(run_id)
+
+    output = result["output"]
+    if result["asked_question"]:
+        output = {**output, "question": result["asked_question"]}
+    # reasoning/tool_calls are deliberately omitted here — every round's
+    # already been persisted live via on_step above; repeating the full
+    # joined reasoning + every tool call again in this final marker row
+    # would just duplicate the whole loop a second time in the UI. This row
+    # exists only to carry the final output/status/duration.
     await repo.add_run_step(
         run_id, step_order, agent["slug"], result["status"],
-        input_data=params, output_data=result["output"],
-        reasoning=result["reasoning"], tool_calls=result["tool_calls"],
+        input_data=params, output_data=output,
         duration_ms=result["duration_ms"],
     )
+
     if result["status"] == "awaiting_user_input":
         await repo.set_run_pending_state(run_id, {
             "messages": result["messages"], "agent_slug": agent["slug"],
@@ -37,21 +63,9 @@ async def _run_and_record(
         })
         await repo.mark_run_awaiting_user_input(run_id, result["asked_question"])
     else:
-        await repo.finish_run(run_id, result["status"], result["output"])
+        await repo.finish_run(run_id, result["status"], output)
     await repo.write_audit_log(user_id, "chat.run", agent["slug"], {"run_id": run_id})
-    return result
-
-
-def _response(run_id: str, agent_slug: str, result: dict) -> dict:
-    return {
-        "status": result["status"],
-        "run_id": run_id,
-        "agent": agent_slug,
-        "output": result["output"],
-        "reasoning": result["reasoning"],
-        "tool_calls": result["tool_calls"],
-        "question": result["asked_question"],
-    }
+    return result["status"]
 
 
 @router.post("")
@@ -79,9 +93,10 @@ async def chat(req: ChatRequest, user: User = Depends(current_user)):
     run_id = await repo.create_run(kind="chat", agent_id=agent["id"], triggered_by=user.id, prompt=req.prompt)
     await repo.add_chat_message(run_id, "user", req.prompt)
     model_provider, model_name, tool_call_mode = await repo.get_user_model_preference(user.id)
-    result = await _run_and_record(run_id, agent, match.params, user.id, model_provider, model_name, tool_call_mode)
-
-    return _response(run_id, agent["slug"], result)
+    asyncio.create_task(run_in_background(run_id, _execute_chat(
+        run_id, agent, match.params, user.id, model_provider, model_name, tool_call_mode,
+    )))
+    return {"status": "queued", "run_id": run_id, "agent": agent["slug"]}
 
 
 @router.post("/{run_id}/reply")
@@ -103,10 +118,9 @@ async def reply(run_id: str, req: ChatReplyRequest, user: User = Depends(current
 
     await repo.add_chat_message(run_id, "user", req.reply)
     history = build_resume_messages(state["model_provider"], state["messages"], req.reply)
-    result = await _run_and_record(
+    asyncio.create_task(run_in_background(run_id, _execute_chat(
         run_id, agent, {}, user.id,
         state["model_provider"], state.get("model_name"), state.get("tool_call_mode", "lenient"),
         history=history,
-    )
-
-    return _response(run_id, agent["slug"], result)
+    )))
+    return {"status": "queued", "run_id": run_id, "agent": agent["slug"]}
