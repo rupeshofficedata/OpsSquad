@@ -86,18 +86,52 @@ async def _run(*args: str, timeout: float = SUBPROCESS_TIMEOUT) -> tuple[int, st
     return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
+# The tool schema sent to a local LLM declares no parameter names
+# (additionalProperties: True, see executor.py's tool_defs) — the model
+# has to guess, and observed live it consistently guesses "resource" or
+# "pod", never the internal "k8s_target" name these tools actually read.
+# That silently made every kubectl.* call ignore whatever the model asked
+# for and fall back to the configured default — found by testing, not
+# assumed. No Flightplan/agent passes "k8s_target" explicitly (grepped),
+# so widening this is safe.
+_TARGET_ALIASES = ("k8s_target", "resource", "target", "pod", "name")
+
+
+def _resolve_target(kwargs: dict[str, Any], default: str) -> Any:
+    for key in _TARGET_ALIASES:
+        if kwargs.get(key):
+            return kwargs[key]
+    return default
+
+
 class RealKubectlGet(Tool):
     name = "kubectl.get"
 
     async def run(self, **kwargs: Any) -> ToolResult:
         try:
-            target = _safe_arg(kwargs.get("k8s_target", settings.kube_read_target))
+            target = _safe_arg(_resolve_target(kwargs, settings.kube_read_target))
         except UnsafeArgError as exc:
             return ToolResult(ok=False, error=str(exc))
         code, out, err = await _run("kubectl", "get", "-n", settings.kube_namespace, "-o", "json", "--", target)
         if code != 0:
             return ToolResult(ok=False, error=err[:500])
         obj = json.loads(out)
+
+        if obj.get("kind", "").endswith("List"):
+            # A bare collection type (e.g. "pods", "deployments") returns
+            # a *List — genuinely enumerate it instead of silently
+            # returning 0/0 by assuming the single-object
+            # .spec.replicas/.status.readyReplicas shape below, which a
+            # List response never has.
+            items = [
+                {
+                    "name": i.get("metadata", {}).get("name"),
+                    "status": i.get("status", {}).get("phase") or i.get("status", {}).get("readyReplicas"),
+                }
+                for i in obj.get("items", [])
+            ]
+            return ToolResult(ok=True, data={"target": target, "items": items, "count": len(items), "real": True})
+
         return ToolResult(ok=True, data={
             "replicas_desired": obj.get("spec", {}).get("replicas", 0),
             "replicas_ready": obj.get("status", {}).get("readyReplicas", 0),
@@ -110,7 +144,7 @@ class RealKubectlLogs(Tool):
 
     async def run(self, **kwargs: Any) -> ToolResult:
         try:
-            target = _safe_arg(kwargs.get("k8s_target", settings.kube_read_target))
+            target = _safe_arg(_resolve_target(kwargs, settings.kube_read_target))
             tail = _safe_int(kwargs.get("tail", 200), minimum=1)
         except (UnsafeArgError, ValueError, TypeError) as exc:
             return ToolResult(ok=False, error=str(exc))
@@ -131,7 +165,7 @@ class RealKubectlRestart(Tool):
 
     async def run(self, **kwargs: Any) -> ToolResult:
         try:
-            target = _safe_arg(kwargs.get("k8s_target", settings.kube_mutate_target))
+            target = _safe_arg(_resolve_target(kwargs, settings.kube_mutate_target))
         except UnsafeArgError as exc:
             return ToolResult(ok=False, error=str(exc))
         code, _, err = await _run(
@@ -146,7 +180,7 @@ class RealKubectlScale(Tool):
 
     async def run(self, **kwargs: Any) -> ToolResult:
         try:
-            target = _safe_arg(kwargs.get("k8s_target", settings.kube_mutate_target))
+            target = _safe_arg(_resolve_target(kwargs, settings.kube_mutate_target))
             replicas = _safe_int(kwargs.get("replicas", 1), minimum=0)
         except (UnsafeArgError, ValueError, TypeError) as exc:
             return ToolResult(ok=False, error=str(exc))
