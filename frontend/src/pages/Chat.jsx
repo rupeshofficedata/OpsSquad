@@ -5,6 +5,81 @@ import { useAuth } from "../auth/AuthContext.jsx";
 
 const STATUS_DOT = { running: "bg-emerald-500", loading: "bg-amber-500", stopped: "bg-red-500" };
 
+const POD_STATUS_DOT = {
+  Running: "bg-emerald-500", Succeeded: "bg-slate-500", Pending: "bg-amber-500",
+  Failed: "bg-red-500", Unknown: "bg-slate-600",
+};
+
+// Every real kubectl.get('pods'/'deployments'/...) call returns this shape
+// (see runtime/app/tools/real.py) — render it as cards instead of letting
+// it sit buried in a JSON dump.
+function ResourceCards({ items }) {
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {items.map((it) => (
+        <div key={it.name} className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1.5 text-xs">
+          <span className={`h-2 w-2 shrink-0 rounded-full ${POD_STATUS_DOT[it.status] || "bg-slate-600"}`} />
+          <span className="truncate text-slate-200" title={it.name}>{it.name}</span>
+          <span className="ml-auto shrink-0 text-slate-500">{it.status}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Small, targeted formatter for the patterns local-model summaries
+// actually produce (bullet lists, **bold**, `code`) — not a full markdown
+// parser, no new dependency for what's a narrow, observed need.
+function FormattedText({ text }) {
+  const inline = (s, key) => {
+    const parts = s.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean);
+    return (
+      <p key={key} className="text-slate-300">
+        {parts.map((p, j) =>
+          p.startsWith("**") ? <strong key={j} className="text-slate-100">{p.slice(2, -2)}</strong>
+          : p.startsWith("`") ? <code key={j} className="rounded bg-slate-950 px-1 text-indigo-300">{p.slice(1, -1)}</code>
+          : p
+        )}
+      </p>
+    );
+  };
+
+  const lines = text.split("\n");
+  const blocks = [];
+  let list = [];
+  lines.forEach((line, i) => {
+    const bullet = line.match(/^[-*]\s+(.*)/);
+    if (bullet) {
+      list.push(bullet[1]);
+    } else {
+      if (list.length) {
+        blocks.push(<ul key={`ul-${i}`} className="ml-4 list-disc space-y-0.5">{list.map((li, j) => <li key={j} className="text-slate-300">{li}</li>)}</ul>);
+        list = [];
+      }
+      if (line.trim()) blocks.push(inline(line, i));
+    }
+  });
+  if (list.length) blocks.push(<ul key="ul-end" className="ml-4 list-disc space-y-0.5">{list.map((li, j) => <li key={j} className="text-slate-300">{li}</li>)}</ul>);
+  return <div className="space-y-1.5">{blocks}</div>;
+}
+
+// A plain structured output (deterministic agents, e.g. diagnose's
+// replicas_ready/recommended_action) rendered as label:value cards
+// instead of a raw JSON dump.
+function KeyValueCards({ data }) {
+  const entries = Object.entries(data).filter(([, v]) => v !== null && v !== undefined);
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {entries.map(([k, v]) => (
+        <div key={k} className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1.5 text-xs">
+          <div className="text-slate-500">{k.replace(/_/g, " ")}</div>
+          <div className="truncate text-slate-200" title={String(v)}>{Array.isArray(v) ? v.join(", ") || "—" : String(v)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function Chat() {
   const { user, updateUser } = useAuth();
   const [prompt, setPrompt] = useState("");
@@ -149,11 +224,26 @@ export default function Chat() {
                   </p>
                 ) : (
                   <>
-                    <pre className="whitespace-pre-wrap text-slate-300">
-                      {JSON.stringify(m.result.output, null, 2)}
-                    </pre>
+                    {(() => {
+                      const items = (m.result.tool_calls || [])
+                        .flatMap((tc) => tc.result?.data?.items || []);
+                      const summary = m.result.output?.summary;
+                      return (
+                        <div className="space-y-2">
+                          {items.length > 0 && <ResourceCards items={items} />}
+                          {typeof summary === "string" && summary.trim() ? (
+                            <FormattedText text={summary} />
+                          ) : (
+                            !items.length && m.result.output && <KeyValueCards data={m.result.output} />
+                          )}
+                        </div>
+                      );
+                    })()}
                     {m.result.reasoning && (
-                      <p className="mt-2 text-xs text-slate-500">Reasoning: {m.result.reasoning}</p>
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-400">Reasoning</summary>
+                        <p className="mt-1 whitespace-pre-wrap text-xs text-slate-500">{m.result.reasoning}</p>
+                      </details>
                     )}
                   </>
                 )}
