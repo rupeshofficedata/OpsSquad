@@ -13,18 +13,20 @@ const POD_STATUS_DOT = {
 // Every real kubectl.get('pods'/'deployments'/...) call returns this shape
 // (see runtime/app/tools/real.py) — render it as cards instead of letting
 // it sit buried in a JSON dump.
+// Field set varies by k8s kind (see _summarize_k8s_item in real.py) — a
+// Pod has ready/status/restarts, a Service has type/cluster_ip/ports,
+// neither has the other's fields. Render whatever's actually present
+// instead of assuming one fixed shape.
 function ResourceCards({ items }) {
   return (
     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-      {items.map((it) => (
-        <div key={it.name} className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1.5 text-xs">
-          <span className={`h-2 w-2 shrink-0 rounded-full ${POD_STATUS_DOT[it.status] || "bg-slate-600"}`} />
-          <span className="truncate text-slate-200" title={it.name}>{it.name}</span>
+      {items.map(({ name, status, ...rest }) => (
+        <div key={name} className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1.5 text-xs">
+          {status !== undefined && <span className={`h-2 w-2 shrink-0 rounded-full ${POD_STATUS_DOT[status] || "bg-slate-600"}`} />}
+          <span className="truncate text-slate-200" title={name}>{name}</span>
           <span className="ml-auto shrink-0 space-x-2 text-slate-500">
-            {it.ready != null && <span>{it.ready}</span>}
-            <span>{it.status}</span>
-            {it.restarts != null && <span>{it.restarts} restarts</span>}
-            {it.age && <span>{it.age}</span>}
+            {status && <span>{status}</span>}
+            {Object.entries(rest).filter(([, v]) => v != null).map(([k, v]) => <span key={k}>{String(v)}</span>)}
           </span>
         </div>
       ))}

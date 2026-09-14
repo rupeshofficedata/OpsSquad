@@ -122,22 +122,50 @@ def _human_age(creation_timestamp: str | None) -> str | None:
     return f"{days}d{hours}h" if hours else f"{days}d"
 
 
+def _service_port_str(p: dict[str, Any]) -> str:
+    proto = p.get("protocol", "TCP")
+    return f"{p['port']}:{p['nodePort']}/{proto}" if p.get("nodePort") else f"{p.get('port')}/{proto}"
+
+
 def _summarize_k8s_item(item: dict[str, Any]) -> dict[str, Any]:
-    """Same columns real `kubectl get pods` shows — a Pod's containerStatuses
-    give ready count + restart count; other resource kinds (Deployments,
-    Services, ...) just won't have that field, and fall back to None."""
-    container_statuses = item.get("status", {}).get("containerStatuses")
-    ready = restarts = None
-    if container_statuses is not None:
-        ready = f"{sum(1 for c in container_statuses if c.get('ready'))}/{len(container_statuses)}"
-        restarts = sum(c.get("restartCount", 0) for c in container_statuses)
-    return {
-        "name": item.get("metadata", {}).get("name"),
-        "status": item.get("status", {}).get("phase") or item.get("status", {}).get("readyReplicas"),
-        "ready": ready,
-        "restarts": restarts,
-        "age": _human_age(item.get("metadata", {}).get("creationTimestamp")),
-    }
+    """Same columns the real `kubectl get <kind>` CLI shows for that
+    specific kind — found by testing that a generic {status, ready,
+    restarts} shape is honest for Pods but wrong for everything else
+    (Services don't have restarts; they have TYPE/CLUSTER-IP/PORT(S),
+    which Pods don't have either)."""
+    metadata, status, spec = item.get("metadata", {}), item.get("status", {}), item.get("spec", {})
+    name = metadata.get("name")
+    age = _human_age(metadata.get("creationTimestamp"))
+    kind = item.get("kind", "")
+
+    if kind == "Service":
+        ingress = status.get("loadBalancer", {}).get("ingress", [])
+        external_ip = ", ".join(spec.get("externalIPs", []) + [i.get("ip") or i.get("hostname", "") for i in ingress]) or "<none>"
+        return {
+            "name": name,
+            "type": spec.get("type", "ClusterIP"),
+            "cluster_ip": spec.get("clusterIP"),
+            "external_ip": external_ip,
+            "ports": ", ".join(_service_port_str(p) for p in spec.get("ports", [])) or None,
+            "age": age,
+        }
+
+    container_statuses = status.get("containerStatuses")
+    if container_statuses is not None:  # Pod
+        return {
+            "name": name,
+            "ready": f"{sum(1 for c in container_statuses if c.get('ready'))}/{len(container_statuses)}",
+            "status": status.get("phase"),
+            "restarts": sum(c.get("restartCount", 0) for c in container_statuses),
+            "age": age,
+        }
+
+    # Deployments/other kinds with a replicas concept — honest fallback
+    # (just name + age) for anything without one, rather than guessing.
+    if "replicas" in spec:
+        return {"name": name, "ready": f"{status.get('readyReplicas', 0)}/{spec.get('replicas', 0)}", "age": age}
+
+    return {"name": name, "age": age}
 
 
 class RealKubectlGet(Tool):
