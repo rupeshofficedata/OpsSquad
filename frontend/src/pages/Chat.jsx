@@ -70,6 +70,56 @@ function FormattedText({ text }) {
   return <div className="space-y-1.5">{blocks}</div>;
 }
 
+// Every tool call an agent made this run (name, exact input args, raw
+// result) — lets you verify a step actually did the right thing instead of
+// trusting the summary text (e.g. confirm kubectl.get really got called
+// with target: "pods", not silently defaulted to something else).
+function StepTrace({ toolCalls }) {
+  return (
+    <details className="mt-2">
+      <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-400">
+        Steps ({toolCalls.length})
+      </summary>
+      <div className="mt-1.5 space-y-1.5">
+        {toolCalls.map((tc, i) => (
+          <details key={i} className="rounded border border-slate-700 bg-slate-950/50 px-2 py-1.5 text-xs">
+            <summary className="cursor-pointer text-slate-300">
+              {tc.result?.ok === false ? "❌" : "✅"} <span className="font-mono">{tc.tool}</span>
+            </summary>
+            <div className="mt-1.5 space-y-1">
+              <div><span className="text-slate-500">input: </span><code className="text-indigo-300">{JSON.stringify(tc.input)}</code></div>
+              <div><span className="text-slate-500">output: </span><code className="text-slate-300">{JSON.stringify(tc.result)}</code></div>
+            </div>
+          </details>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+// Inline reply box for a paused (awaiting_user_input) run — the model
+// called ask_user and is waiting; submitting resumes that same run_id with
+// the full prior tool-use history (see POST /chat/{run_id}/reply).
+function ReplyBox({ busy, onReply }) {
+  const [text, setText] = useState("");
+  return (
+    <form
+      onSubmit={(e) => { e.preventDefault(); if (!text.trim()) return; onReply(text); setText(""); }}
+      className="mt-2 flex gap-2"
+    >
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="Your answer…"
+        className="flex-1 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm outline-none focus:border-indigo-500"
+      />
+      <button type="submit" disabled={busy} className="rounded-md bg-indigo-600 px-3 py-1 text-sm font-medium hover:bg-indigo-500 disabled:opacity-50">
+        Reply
+      </button>
+    </form>
+  );
+}
+
 // A plain structured output (deterministic agents, e.g. diagnose's
 // replicas_ready/recommended_action) rendered as label:value cards
 // instead of a raw JSON dump.
@@ -97,6 +147,7 @@ export default function Chat() {
   const [modelNameDraft, setModelNameDraft] = useState(user.model_name || "");
   const [modelStatus, setModelStatus] = useState(null);
   const [starting, setStarting] = useState(false);
+  const [answeredIndices, setAnsweredIndices] = useState(new Set());
 
   useEffect(() => {
     if (user.model_provider !== "local") return;
@@ -136,6 +187,15 @@ export default function Chat() {
     }
   }
 
+  async function handleToolCallModeChange(toolCallMode) {
+    setModelSaving(true);
+    try {
+      updateUser(await api.updateModelPreference("local", modelNameDraft || null, toolCallMode));
+    } finally {
+      setModelSaving(false);
+    }
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     if (!prompt.trim()) return;
@@ -145,6 +205,20 @@ export default function Chat() {
     setPrompt("");
     try {
       const result = await api.chat(mine.text, env);
+      setHistory((h) => [...h, { role: "agent", result }]);
+    } catch (err) {
+      setHistory((h) => [...h, { role: "error", text: err.message }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleReply(runId, index, replyText) {
+    setAnsweredIndices((s) => new Set(s).add(index));
+    setBusy(true);
+    setHistory((h) => [...h, { role: "user", text: replyText }]);
+    try {
+      const result = await api.replyToChat(runId, replyText);
       setHistory((h) => [...h, { role: "agent", result }]);
     } catch (err) {
       setHistory((h) => [...h, { role: "error", text: err.message }]);
@@ -177,6 +251,16 @@ export default function Chat() {
                 placeholder="model label, e.g. qwen2.5-coder:7b"
                 className="w-44 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
               />
+              <select
+                value={user.tool_call_mode || "lenient"}
+                onChange={(e) => handleToolCallModeChange(e.target.value)}
+                disabled={modelSaving}
+                title="strict: only trust the model's real structured tool_calls field. lenient: also parse tool calls the model wrote as plain text."
+                className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
+              >
+                <option value="lenient">Lenient (fallback parsing)</option>
+                <option value="strict">Strict (real tool calls only)</option>
+              </select>
               <span
                 className={`h-2.5 w-2.5 rounded-full ${STATUS_DOT[modelStatus] || "bg-slate-600"}`}
                 title={`model: ${modelStatus || "unknown"}`}
@@ -246,11 +330,18 @@ export default function Chat() {
                         </div>
                       );
                     })()}
+                    {m.result.tool_calls?.length > 0 && <StepTrace toolCalls={m.result.tool_calls} />}
                     {m.result.reasoning && (
                       <details className="mt-2">
                         <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-400">Reasoning</summary>
                         <p className="mt-1 whitespace-pre-wrap text-xs text-slate-500">{m.result.reasoning}</p>
                       </details>
+                    )}
+                    {m.result.status === "awaiting_user_input" && !answeredIndices.has(i) && (
+                      <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-950/20 p-2">
+                        <p className="text-sm text-amber-400">❓ {m.result.question}</p>
+                        <ReplyBox busy={busy} onReply={(text) => handleReply(m.result.run_id, i, text)} />
+                      </div>
                     )}
                   </>
                 )}

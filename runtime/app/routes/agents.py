@@ -30,8 +30,8 @@ async def run_agent_direct(slug: str, req: AgentRunRequest, user: User = Depends
         return {"status": "awaiting_approval", "run_id": run_id}
 
     run_id = await repo.create_run(kind="chat", agent_id=agent["id"], triggered_by=user.id)
-    model_provider, model_name = await repo.get_user_model_preference(user.id)
-    result = await run_agent(agent, req.params, model_provider=model_provider, model_name=model_name)
+    model_provider, model_name, tool_call_mode = await repo.get_user_model_preference(user.id)
+    result = await run_agent(agent, req.params, model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode)
     await repo.add_run_step(
         run_id, 0, slug, result["status"],
         input_data=req.params, output_data=result["output"],

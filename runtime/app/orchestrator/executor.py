@@ -26,13 +26,42 @@ import httpx
 from app.agents import AgentContext, get_agent_impl
 from app.config import settings
 from app.tools import get_tool
+from app.tools.schemas import TOOL_SCHEMAS
+from app.tools.stubs import SIMULATED_TOOLS
 
 MAX_TOOL_ITERATIONS = 8
 LOCAL_LLM_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=5.0)
 
+# A real declared tool, not prose-parsing — lets the model pause a run and
+# ask the person something instead of guessing. Only ever added to tool_defs
+# for allow_ask_user=True (chat-originated runs — see routes/chat.py). A
+# cron/webhook/Flightplan run never gets it: nobody's there to answer, and
+# the run would just hang at 'awaiting_user_input' forever.
+ASK_USER_TOOL_NAME = "ask_user"
+ASK_USER_SCHEMA = {
+    "type": "object",
+    "properties": {"question": {"type": "string", "description": "The question to ask the user before continuing"}},
+    "required": ["question"],
+}
+ASK_USER_DESCRIPTION = "Ask the user a clarifying question and pause until they reply. Only use when you genuinely can't proceed without their input."
+
 
 class AgentExecutionError(Exception):
     pass
+
+
+def build_resume_messages(model_provider: str, messages: list[dict[str, Any]], reply: str) -> list[dict[str, Any]]:
+    """`messages` is the raw provider-format history returned by run_agent()
+    when it paused on ask_user (its last entry is the assistant turn that
+    called ask_user, still unanswered). Appends the user's reply as the
+    matching tool result so the loop can resume exactly where it paused —
+    each provider requires that shape before it will accept the next turn."""
+    last = messages[-1]
+    if model_provider == "anthropic":
+        ask_block = next(b for b in last["content"] if b.get("type") == "tool_use" and b.get("name") == ASK_USER_TOOL_NAME)
+        return messages + [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": ask_block["id"], "content": reply}]}]
+    call = next(c for c in last["tool_calls"] if c["function"]["name"] == ASK_USER_TOOL_NAME)
+    return messages + [{"role": "tool", "tool_call_id": call["id"], "content": reply}]
 
 
 async def run_agent(
@@ -40,14 +69,28 @@ async def run_agent(
     params: dict[str, Any],
     model_provider: str = "anthropic",
     model_name: str | None = None,
+    tool_call_mode: str = "lenient",
+    allow_ask_user: bool = False,
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """agent: a row from the `agents` table (as dict). params: caller-supplied args."""
+    """agent: a row from the `agents` table (as dict). params: caller-supplied args.
+
+    tool_call_mode: local-model only. 'lenient' (default) keeps every
+    fallback tool-call parser; 'strict' trusts only the structured
+    tool_calls field, same rule Claude already follows.
+    allow_ask_user / history: see ASK_USER_TOOL_NAME above and
+    routes/chat.py's POST /chat + POST /chat/{run_id}/reply.
+    """
     start = time.monotonic()
     tool_names: list[str] = agent["tools"] if isinstance(agent["tools"], list) else []
+    asked_question: str | None = None
+    messages_out: list[dict[str, Any]] | None = None
 
     if model_provider == "local":
         try:
-            output, reasoning, tool_calls = await _run_with_local_llm(agent, params, tool_names, model_name)
+            output, reasoning, tool_calls, asked_question, messages_out = await _run_with_local_llm(
+                agent, params, tool_names, model_name, tool_call_mode, allow_ask_user, history,
+            )
             status = "success"  # same caveat as Claude below — we don't parse free text for pass/fail
         except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
             # HTTPStatusError added after a live 500 from llama-server itself
@@ -57,10 +100,15 @@ async def run_agent(
             output, reasoning, tool_calls, status = await _run_simulated(agent, params, tool_names)
             reasoning = f"Local LLM at {settings.local_llm_base_url} failed ({exc}) — ran simulated instead. {reasoning}"
     elif model_provider == "anthropic" and settings.anthropic_api_key:
-        output, reasoning, tool_calls = await _run_with_claude(agent, params, tool_names, model_name)
+        output, reasoning, tool_calls, asked_question, messages_out = await _run_with_claude(
+            agent, params, tool_names, model_name, allow_ask_user, history,
+        )
         status = "success"  # Claude reasons freely over the tools; we don't parse its text for pass/fail
     else:
         output, reasoning, tool_calls, status = await _run_simulated(agent, params, tool_names)
+
+    if asked_question:
+        status = "awaiting_user_input"
 
     duration_ms = int((time.monotonic() - start) * 1000)
     return {
@@ -69,6 +117,8 @@ async def run_agent(
         "reasoning": reasoning,
         "tool_calls": tool_calls,
         "duration_ms": duration_ms,
+        "asked_question": asked_question,
+        "messages": messages_out,
     }
 
 
@@ -104,27 +154,27 @@ async def _run_simulated(
 
 
 async def _run_with_claude(
-    agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None
-) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+    agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None,
+    allow_ask_user: bool = False, history: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None, list[dict[str, Any]]]:
     import anthropic
 
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     tool_defs = [
-        {
-            "name": name,
-            "description": f"Invoke the '{name}' tool.",
-            "input_schema": {"type": "object", "properties": {}, "additionalProperties": True},
-        }
+        {"name": name, "description": SIMULATED_TOOLS[name], "input_schema": TOOL_SCHEMAS[name]}
         for name in tool_names
     ]
+    if allow_ask_user:
+        tool_defs.append({"name": ASK_USER_TOOL_NAME, "description": ASK_USER_DESCRIPTION, "input_schema": ASK_USER_SCHEMA})
 
-    messages: list[dict[str, Any]] = [
+    messages: list[dict[str, Any]] = history or [
         {"role": "user", "content": f"Task parameters: {params}"}
     ]
     tool_calls: list[dict[str, Any]] = []
     reasoning_parts: list[str] = []
     final_text = ""
+    asked_question: str | None = None
 
     for _ in range(MAX_TOOL_ITERATIONS):
         response = await client.messages.create(
@@ -144,7 +194,17 @@ async def _run_with_claude(
         if not tool_use_blocks:
             break
 
-        messages.append({"role": "assistant", "content": response.content})
+        # Stored as plain dicts (not the SDK's pydantic content-block
+        # objects) so this history round-trips through the `runs.inputs`
+        # JSONB column when a run pauses on ask_user and resumes later
+        # (see build_resume_messages / routes/chat.py's /reply).
+        messages.append({"role": "assistant", "content": [b.model_dump() for b in response.content]})
+
+        ask_block = next((b for b in tool_use_blocks if b.name == ASK_USER_TOOL_NAME), None)
+        if ask_block:
+            asked_question = (ask_block.input or {}).get("question", "")
+            break
+
         tool_results = []
         for block in tool_use_blocks:
             try:
@@ -160,7 +220,7 @@ async def _run_with_claude(
             )
         messages.append({"role": "user", "content": tool_results})
 
-    return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls
+    return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, messages
 
 
 # Any (or no) fence language tag — observed live: ```xml wrapping a JSON
@@ -279,28 +339,33 @@ def _extract_content_tool_calls(content: str) -> list[dict[str, Any]]:
 
 
 async def _run_with_local_llm(
-    agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None
-) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+    agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None,
+    tool_call_mode: str = "lenient", allow_ask_user: bool = False, history: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None, list[dict[str, Any]]]:
     """Same tool-use loop as Claude, against an OpenAI-compatible
     /chat/completions endpoint (llama-server, Ollama, vLLM, ...). The wire
     format differs from Anthropic's: tool calls arrive as
     message.tool_calls[].function.{name,arguments} (arguments is a JSON
     string, not a parsed object), and results go back as role="tool"
     messages keyed by tool_call_id rather than role="user" tool_result blocks.
+
+    tool_call_mode='strict' skips every fallback below (content-text
+    parsing, repeat-loop breaker, unexecuted-final-text rewrite) and only
+    trusts the structured tool_calls field — same rule _run_with_claude
+    already follows, for a model that reliably emits it.
     """
+    lenient = tool_call_mode != "strict"
     tool_defs = [
         {
             "type": "function",
-            "function": {
-                "name": name,
-                "description": f"Invoke the '{name}' tool.",
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
-            },
+            "function": {"name": name, "description": SIMULATED_TOOLS[name], "parameters": TOOL_SCHEMAS[name]},
         }
         for name in tool_names
     ]
+    if allow_ask_user:
+        tool_defs.append({"type": "function", "function": {"name": ASK_USER_TOOL_NAME, "description": ASK_USER_DESCRIPTION, "parameters": ASK_USER_SCHEMA}})
 
-    messages: list[dict[str, Any]] = [
+    messages: list[dict[str, Any]] = history or [
         {"role": "system", "content": agent["system_prompt"]},
         # Smaller local models are inconsistent about initiating tool use on
         # a bare params dump (observed: describing what it would do in
@@ -311,6 +376,7 @@ async def _run_with_local_llm(
     tool_calls: list[dict[str, Any]] = []
     reasoning_parts: list[str] = []
     final_text = ""
+    asked_question: str | None = None
     seen_call_signatures: set[str] = set()
     fallback_call_counter = 0
     stopped_cleanly = False
@@ -334,7 +400,7 @@ async def _run_with_local_llm(
                 final_text = message["content"]
 
             calls = message.get("tool_calls") or []
-            if not calls and message.get("content"):
+            if lenient and not calls and message.get("content"):
                 # Small/local models frequently don't emit the structured
                 # OpenAI tool_calls field even with --jinja and a tools
                 # payload — they write the call(s) as JSON text instead
@@ -363,17 +429,28 @@ async def _run_with_local_llm(
                 stopped_cleanly = True
                 break
 
-            # Small local models frequently fail to recognize a tool result
-            # as an answer and re-issue the exact same call forever instead
-            # of stopping (observed with Qwen2.5-Coder-7B) — without this,
-            # that burns every iteration on identical repeated no-op calls.
-            signatures = {call["function"]["name"] + "|" + (call["function"].get("arguments") or "") for call in calls}
-            if signatures <= seen_call_signatures:
-                stopped_cleanly = True
-                break
-            seen_call_signatures |= signatures
+            if lenient:
+                # Small local models frequently fail to recognize a tool
+                # result as an answer and re-issue the exact same call
+                # forever instead of stopping (observed with
+                # Qwen2.5-Coder-7B) — without this, that burns every
+                # iteration on identical repeated no-op calls.
+                signatures = {call["function"]["name"] + "|" + (call["function"].get("arguments") or "") for call in calls}
+                if signatures <= seen_call_signatures:
+                    stopped_cleanly = True
+                    break
+                seen_call_signatures |= signatures
 
             messages.append(message)
+
+            ask_call = next((c for c in calls if c["function"]["name"] == ASK_USER_TOOL_NAME), None)
+            if ask_call:
+                try:
+                    asked_question = json.loads(ask_call["function"].get("arguments") or "{}").get("question", "")
+                except json.JSONDecodeError:
+                    asked_question = ""
+                break
+
             for call in calls:
                 name = call["function"]["name"]
                 try:
@@ -391,18 +468,19 @@ async def _run_with_local_llm(
                 tool_calls.append({"tool": name, "input": call_args, "result": result_payload})
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(result_payload)})
 
-    # A "clean" stop isn't always a real answer — observed live: the
-    # model's last proposal used invalid JSON (Python-style single-quoted
-    # list) so it silently failed to parse into a call, the loop correctly
-    # saw "no calls" and stopped, but final_text is still that broken
-    # proposal, not prose. Treat that the same as running out of
-    # iterations: prefer the real tool results already collected.
-    final_looks_unexecuted = "<function " in final_text or (
-        "```" in final_text and "arguments" in final_text and ('"name"' in final_text or "'name'" in final_text)
-    )
-    if tool_calls and (not stopped_cleanly or final_looks_unexecuted):
-        final_text = f"Model did not produce a final summary after {MAX_TOOL_ITERATIONS} tool-call rounds. Real tool results:\n" + "\n".join(
-            f"- {tc['tool']}({tc['input']}) -> {tc['result'].get('data') or tc['result'].get('error')}" for tc in tool_calls
+    if lenient:
+        # A "clean" stop isn't always a real answer — observed live: the
+        # model's last proposal used invalid JSON (Python-style single-quoted
+        # list) so it silently failed to parse into a call, the loop correctly
+        # saw "no calls" and stopped, but final_text is still that broken
+        # proposal, not prose. Treat that the same as running out of
+        # iterations: prefer the real tool results already collected.
+        final_looks_unexecuted = "<function " in final_text or (
+            "```" in final_text and "arguments" in final_text and ('"name"' in final_text or "'name'" in final_text)
         )
+        if tool_calls and (not stopped_cleanly or final_looks_unexecuted):
+            final_text = f"Model did not produce a final summary after {MAX_TOOL_ITERATIONS} tool-call rounds. Real tool results:\n" + "\n".join(
+                f"- {tc['tool']}({tc['input']}) -> {tc['result'].get('data') or tc['result'].get('error')}" for tc in tool_calls
+            )
 
-    return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls
+    return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, messages

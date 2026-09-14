@@ -23,7 +23,13 @@ CREATE TABLE users (
     -- only, since a llama.cpp server serves whichever single GGUF it loaded.
     model_provider VARCHAR(20) NOT NULL DEFAULT 'anthropic'
         CHECK (model_provider IN ('anthropic', 'local')),
-    model_name     VARCHAR(120)
+    model_name     VARCHAR(120),
+    -- 'local' model only. 'lenient' keeps every fallback tool-call parser
+    -- (bare/fenced JSON, XML tags, repeat-loop breaker) for small models
+    -- that don't reliably emit the structured tool_calls field. 'strict'
+    -- trusts only that structured field, same rule Claude already follows.
+    tool_call_mode VARCHAR(20) NOT NULL DEFAULT 'lenient'
+        CHECK (tool_call_mode IN ('lenient', 'strict'))
 );
 
 -- ============================================
@@ -60,7 +66,7 @@ CREATE TABLE flightplans (
 -- RUNS — one execution (chat run OR flightplan run)
 -- ============================================
 CREATE TYPE run_status AS ENUM
-    ('queued','running','awaiting_approval','success','failed','aborted','skipped');
+    ('queued','running','awaiting_approval','awaiting_user_input','success','failed','aborted','skipped');
 
 CREATE TABLE runs (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -92,6 +98,21 @@ CREATE TABLE run_steps (
     status      run_status NOT NULL,
     duration_ms INT
 );
+
+-- ============================================
+-- CHAT MESSAGES — persisted multi-turn history for a chat run
+-- (a chat run can pause at 'awaiting_user_input' via the ask_user tool,
+-- then resume with this history once the user replies)
+-- ============================================
+CREATE TABLE chat_messages (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id     UUID REFERENCES runs(id) ON DELETE CASCADE,
+    role       VARCHAR(10) NOT NULL CHECK (role IN ('user', 'agent', 'tool')),
+    content    TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_chat_messages_run ON chat_messages(run_id, created_at);
 
 -- ============================================
 -- AUDIT LOG — admin-only, append-only

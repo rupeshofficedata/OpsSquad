@@ -89,19 +89,19 @@ async def _rebuild_context(run_id: str, inputs: dict[str, Any]) -> dict[str, Any
 
 async def execute_flightplan(
     run_id: str, flightplan: dict[str, Any], inputs: dict[str, Any], user_role: str,
-    model_provider: str = "anthropic", model_name: str | None = None,
+    model_provider: str = "anthropic", model_name: str | None = None, tool_call_mode: str = "lenient",
 ) -> str:
     """Runs steps from the beginning. Returns 'success' | 'failed' | 'awaiting_approval'."""
     context: dict[str, Any] = {"inputs": inputs, "steps": {}}
     return await _run_steps(
         run_id, flightplan, context, start_at=0,
-        user_role=user_role, model_provider=model_provider, model_name=model_name,
+        user_role=user_role, model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode,
     )
 
 
 async def resume_flightplan(
     run_id: str, flightplan: dict[str, Any], inputs: dict[str, Any], user_role: str,
-    model_provider: str = "anthropic", model_name: str | None = None,
+    model_provider: str = "anthropic", model_name: str | None = None, tool_call_mode: str = "lenient",
 ) -> str:
     """Resumes a run that's sitting at 'awaiting_approval', continuing past
     the approval step it paused on."""
@@ -109,13 +109,13 @@ async def resume_flightplan(
     resume_from = await repo.count_run_steps(run_id) + 1  # +1 skips the approval step itself
     return await _run_steps(
         run_id, flightplan, context, start_at=resume_from,
-        user_role=user_role, model_provider=model_provider, model_name=model_name,
+        user_role=user_role, model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode,
     )
 
 
 async def _run_steps(
     run_id: str, flightplan: dict[str, Any], context: dict[str, Any], start_at: int, user_role: str,
-    model_provider: str = "anthropic", model_name: str | None = None,
+    model_provider: str = "anthropic", model_name: str | None = None, tool_call_mode: str = "lenient",
 ) -> str:
     await repo.mark_run_running(run_id)
 
@@ -184,7 +184,7 @@ async def _run_steps(
         if "guardrails" in step:
             params["guardrails"] = _resolve_templates(step["guardrails"], context)
 
-        result = await run_agent(agent, params, model_provider=model_provider, model_name=model_name)
+        result = await run_agent(agent, params, model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode)
         step_status = result["status"]
 
         await repo.add_run_step(

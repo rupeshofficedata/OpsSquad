@@ -27,13 +27,15 @@ export const api = {
   refresh: () => request("/api/auth/refresh", { method: "POST" }),
   logout: () => request("/api/auth/logout", { method: "POST" }),
   me: () => request("/api/me"),
-  updateModelPreference: (provider, model) =>
-    request("/api/me/model", { method: "PATCH", body: JSON.stringify({ provider, model }) }),
+  updateModelPreference: (provider, model, toolCallMode) =>
+    request("/api/me/model", { method: "PATCH", body: JSON.stringify({ provider, model, toolCallMode }) }),
   getModelStatus: () => request("/api/model/status"),
   startModel: () => request("/api/model/start", { method: "POST" }),
   listAgents: () => request("/api/agents"),
   chat: (prompt, env = "staging") =>
     request("/api/chat", { method: "POST", body: JSON.stringify({ prompt, env }) }),
+  replyToChat: (runId, reply) =>
+    request(`/api/chat/${runId}/reply`, { method: "POST", body: JSON.stringify({ reply }) }),
   listFlightplans: () => request("/api/flightplans"),
   executeFlightplan: (slug, inputs) =>
     request(`/api/flightplans/${slug}/execute`, { method: "POST", body: JSON.stringify({ inputs }) }),

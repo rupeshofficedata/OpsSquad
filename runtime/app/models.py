@@ -8,6 +8,10 @@ class ChatRequest(BaseModel):
     env: str = "staging"
 
 
+class ChatReplyRequest(BaseModel):
+    reply: str
+
+
 class AgentRunRequest(BaseModel):
     params: dict[str, Any] = {}
     env: str = "staging"

@@ -21,3 +21,16 @@ router.post("/", requireAuth, asyncHandler(async (req, res) => {
   const body = await resp.json();
   res.status(resp.status).json(body);
 }));
+
+router.post("/:runId/reply", requireAuth, asyncHandler(async (req, res) => {
+  const resp = await fetch(`${config.runtimeUrl}/chat/${req.params.runId}/reply`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: req.headers.authorization,
+    },
+    body: JSON.stringify(req.body),
+  });
+  const body = await resp.json();
+  res.status(resp.status).json(body);
+}));

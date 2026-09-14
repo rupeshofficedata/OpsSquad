@@ -75,7 +75,7 @@ export default function RunDetail() {
               Approve
             </button>
           )}
-          {["queued", "running", "awaiting_approval"].includes(run.status) && (
+          {["queued", "running", "awaiting_approval", "awaiting_user_input"].includes(run.status) && (
             <button onClick={handleAbort} className="rounded-md border border-red-700 px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">
               Abort
             </button>
@@ -99,6 +99,27 @@ export default function RunDetail() {
               <span className="text-xs uppercase text-slate-400">{s.status}</span>
             </div>
             {s.reasoning && <p className="mt-2 text-sm text-slate-400">{s.reasoning}</p>}
+            {s.tool_calls?.length > 0 && (
+              <div className="mt-2 space-y-1.5">
+                {s.tool_calls.map((tc, i) => (
+                  <details key={i} className="rounded border border-slate-800 bg-slate-950/50 px-2 py-1.5 text-xs">
+                    <summary className="cursor-pointer text-slate-300">
+                      {tc.result?.ok === false ? "❌" : "✅"} <span className="font-mono">{tc.tool}</span>
+                    </summary>
+                    <div className="mt-1.5 space-y-1">
+                      <div>
+                        <span className="text-slate-500">input: </span>
+                        <code className="text-indigo-300">{JSON.stringify(tc.input)}</code>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">output: </span>
+                        <code className="text-slate-300">{JSON.stringify(tc.result)}</code>
+                      </div>
+                    </div>
+                  </details>
+                ))}
+              </div>
+            )}
             {s.output && (
               <pre className="mt-2 whitespace-pre-wrap text-xs text-slate-500">
                 {JSON.stringify(s.output, null, 2)}

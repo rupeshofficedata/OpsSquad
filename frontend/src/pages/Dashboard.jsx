@@ -8,6 +8,7 @@ const STATUS_COLOR = {
   running: "text-amber-400",
   queued: "text-slate-400",
   awaiting_approval: "text-indigo-400",
+  awaiting_user_input: "text-amber-400",
   aborted: "text-slate-500",
 };
 

@@ -30,12 +30,12 @@ async def execute(slug: str, req: FlightplanExecuteRequest, user: User = Depends
     )
     await repo.write_audit_log(user.id, "flightplan.execute", slug, {"run_id": run_id, "inputs": req.inputs})
 
-    model_provider, model_name = await repo.get_user_model_preference(user.id)
+    model_provider, model_name, tool_call_mode = await repo.get_user_model_preference(user.id)
     # Backgrounded so this request returns immediately instead of blocking
     # for the whole run — RunDetail's WS stream/polling picks up progress.
     asyncio.create_task(run_in_background(run_id, execute_flightplan(
         run_id, flightplan, req.inputs, user_role=user.role,
-        model_provider=model_provider, model_name=model_name,
+        model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode,
     )))
     return {"status": "queued", "run_id": run_id}
 
@@ -56,11 +56,11 @@ async def approve(run_id: str, user: User = Depends(require_role("admin"))):
     # approver's — approval clears the human gate, it doesn't elevate who
     # the rest of the run executes as.
     triggering_role = await repo.get_user_role(run["triggered_by"]) or "viewer"
-    model_provider, model_name = await repo.get_user_model_preference(run["triggered_by"])
+    model_provider, model_name, tool_call_mode = await repo.get_user_model_preference(run["triggered_by"])
 
     await repo.write_audit_log(user.id, "flightplan.approve", flightplan["slug"], {"run_id": run_id})
     asyncio.create_task(run_in_background(run_id, resume_flightplan(
         run_id, flightplan, run["inputs"] or {}, user_role=triggering_role,
-        model_provider=model_provider, model_name=model_name,
+        model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode,
     )))
     return {"status": "running", "run_id": run_id}

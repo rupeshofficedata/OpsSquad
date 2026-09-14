@@ -7,7 +7,7 @@ export const router = Router();
 
 router.get("/", requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
-    "SELECT id, email, full_name, role, model_provider, model_name, created_at FROM users WHERE id = $1",
+    "SELECT id, email, full_name, role, model_provider, model_name, tool_call_mode, created_at FROM users WHERE id = $1",
     [req.user.sub]
   );
   const user = rows[0];
@@ -16,13 +16,17 @@ router.get("/", requireAuth, asyncHandler(async (req, res) => {
 }));
 
 router.patch("/model", requireAuth, asyncHandler(async (req, res) => {
-  const { provider, model } = req.body;
+  const { provider, model, toolCallMode } = req.body;
   if (!["anthropic", "local"].includes(provider)) {
     return res.status(400).json({ error: "provider must be 'anthropic' or 'local'" });
   }
+  if (toolCallMode !== undefined && !["lenient", "strict"].includes(toolCallMode)) {
+    return res.status(400).json({ error: "toolCallMode must be 'lenient' or 'strict'" });
+  }
   const { rows } = await pool.query(
-    "UPDATE users SET model_provider = $2, model_name = $3 WHERE id = $1 RETURNING model_provider, model_name",
-    [req.user.sub, provider, model || null]
+    `UPDATE users SET model_provider = $2, model_name = $3, tool_call_mode = COALESCE($4, tool_call_mode)
+     WHERE id = $1 RETURNING model_provider, model_name, tool_call_mode`,
+    [req.user.sub, provider, model || null, toolCallMode || null]
   );
   res.json(rows[0]);
 }));

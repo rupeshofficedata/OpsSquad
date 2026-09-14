@@ -21,14 +21,15 @@ async def get_user_role(user_id: str) -> str | None:
     return row["role"] if row else None
 
 
-async def get_user_model_preference(user_id: str) -> tuple[str, str | None]:
-    """Returns (provider, model_name). Defaults to ('anthropic', None) for a
-    webhook-triggered run with no human user_id."""
+async def get_user_model_preference(user_id: str) -> tuple[str, str | None, str]:
+    """Returns (provider, model_name, tool_call_mode). Defaults to
+    ('anthropic', None, 'lenient') for a webhook-triggered run with no
+    human user_id."""
     if user_id is None:
-        return "anthropic", None
+        return "anthropic", None, "lenient"
     pool = get_pool()
-    row = await pool.fetchrow("SELECT model_provider, model_name FROM users WHERE id = $1", user_id)
-    return (row["model_provider"], row["model_name"]) if row else ("anthropic", None)
+    row = await pool.fetchrow("SELECT model_provider, model_name, tool_call_mode FROM users WHERE id = $1", user_id)
+    return (row["model_provider"], row["model_name"], row["tool_call_mode"]) if row else ("anthropic", None, "lenient")
 
 
 async def get_flightplan(slug: str) -> dict[str, Any] | None:
@@ -145,12 +146,45 @@ async def abort_run(run_id: str) -> bool:
     row = await pool.fetchrow(
         """
         UPDATE runs SET status = 'aborted', finished_at = NOW()
-        WHERE id = $1 AND status IN ('queued', 'running', 'awaiting_approval')
+        WHERE id = $1 AND status IN ('queued', 'running', 'awaiting_approval', 'awaiting_user_input')
         RETURNING id
         """,
         run_id,
     )
     return row is not None
+
+
+async def set_run_pending_state(run_id: str, state: dict[str, Any]) -> None:
+    """Stashes the raw provider-format conversation (+ which agent/model it
+    belongs to) into the otherwise-unused `runs.inputs` column while a chat
+    run is paused at 'awaiting_user_input', so POST /chat/{id}/reply can
+    resume the tool-use loop exactly where it left off."""
+    pool = get_pool()
+    await pool.execute("UPDATE runs SET inputs = $2 WHERE id = $1", run_id, state)
+
+
+async def mark_run_awaiting_user_input(run_id: str, question: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE runs SET status = 'awaiting_user_input' WHERE id = $1", run_id,
+    )
+    await add_chat_message(run_id, "agent", question)
+
+
+async def add_chat_message(run_id: str, role: str, content: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "INSERT INTO chat_messages (run_id, role, content) VALUES ($1, $2, $3)",
+        run_id, role, content,
+    )
+
+
+async def list_chat_messages(run_id: str) -> list[dict[str, Any]]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM chat_messages WHERE run_id = $1 ORDER BY created_at", run_id,
+    )
+    return [dict(r) for r in rows]
 
 
 async def count_run_steps(run_id: str) -> int:
