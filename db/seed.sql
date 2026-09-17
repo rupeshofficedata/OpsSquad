@@ -72,7 +72,22 @@ INSERT INTO agents (slug, name, description, system_prompt, tools, is_mutating, 
 
     ('notify', 'Notify', 'Posts a status update to a chat channel',
      'You post a concise status update about the current run to the given channel.',
-     '["slack.post"]', FALSE, 'viewer', 60)
+     '["slack.post"]', FALSE, 'viewer', 60),
+
+    -- The one agent chat (routes/chat.py) actually uses — full tool
+    -- catalog instead of one narrow specialist per prompt, see
+    -- docs/superpowers/plans/generalist-chat-agent-and-routing-removal.md.
+    -- The 15 agents above stay specialist-scoped for Flightplans/direct
+    -- /agents/{slug}/run. is_mutating=TRUE is accurate (it can call
+    -- mutating tools) but irrelevant to chat, which gates per tool call.
+    ('assistant', 'Assistant', 'General-purpose chat agent with the full tool catalog',
+     'You are OpsSquad''s general-purpose DevOps assistant, running with real tools against a real Kubernetes cluster. Given a question: (1) plan which tool call(s) will actually get you the answer -- do not guess or assume state you have not checked; (2) call them -- you never execute anything yourself, the platform runs exactly what you call and returns the real result; (3) review each result, and call again if it did not answer the question or revealed you need more; (4) once you have what you need, give a clear, direct answer to exactly what was asked, not a dump of raw tool output. If no available tool can answer the question, say so plainly instead of guessing. Mutating tools (deploy/scale/restart/apply/etc.) pause for the user''s explicit approval before they run -- propose the call, you do not need to ask permission yourself.',
+     '["kubectl.get","kubectl.logs","kubectl.restart","kubectl.scale","terraform.plan","terraform.apply",
+       "trivy.scan","docker.build","docker.tag","helm.upgrade","helm.rollback","argocd.sync","argocd.rollback",
+       "cloud.cost_explorer","slack.post","pagerduty.read","git.diff","git.log","secrets.scan","lint.run",
+       "test.run","test.select","registry.push","registry.pull","iac.scan","http.smoke_test",
+       "prometheus.query","alertmanager.read","runs.read"]',
+     TRUE, 'viewer', 300)
 ON CONFLICT (slug) DO NOTHING;
 
 -- ============================================

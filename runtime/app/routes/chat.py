@@ -6,10 +6,16 @@ from app import repo
 from app.models import ChatReplyRequest, ChatRequest
 from app.orchestrator.executor import build_resume_messages, execute_paused_round, run_agent
 from app.orchestrator.graph import run_in_background
-from app.orchestrator.router import classify
 from app.security import User, current_user, role_at_least
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+# The one agent chat actually uses — full tool catalog, no per-prompt
+# routing. See docs/superpowers/plans/generalist-chat-agent-and-routing-removal.md
+# for why: keyword routing to one of the 15 specialists silently
+# misrouted any prompt with no keyword overlap to agents[0], with no
+# error, and RBAC-checked the wrong agent's min_role in the process.
+CHAT_AGENT_SLUG = "assistant"
 
 
 async def _execute_chat(
@@ -78,31 +84,21 @@ async def _execute_chat(
 
 @router.post("")
 async def chat(req: ChatRequest, user: User = Depends(current_user)):
-    agents = await repo.list_agents()
-    if not agents:
-        raise HTTPException(503, "No agents registered — run db/seed.sql")
-
-    match = await classify(req.prompt, agents)
-    agent = await repo.get_agent(match.agent_slug)
+    agent = await repo.get_agent(CHAT_AGENT_SLUG)
     if agent is None:
-        raise HTTPException(404, f"Routed agent '{match.agent_slug}' not found")
+        raise HTTPException(503, f"Chat agent '{CHAT_AGENT_SLUG}' not registered — run db/seed.sql")
 
-    # RBAC — re-checked here, never trusted from the BFF alone.
+    # RBAC — re-checked here, never trusted from the BFF alone. Always
+    # passes today (min_role='viewer' on the chat agent) — kept for
+    # consistency/defense-in-depth rather than special-cased away.
     if not role_at_least(user.role, agent["min_role"]):
         raise HTTPException(403, f"role '{user.role}' cannot run '{agent['slug']}' (needs >= '{agent['min_role']}')")
-
-    # Mutating agents in prod always need an approval record, never run inline.
-    if agent["is_mutating"] and req.env == "prod":
-        run_id = await repo.create_run(kind="chat", agent_id=agent["id"], triggered_by=user.id, prompt=req.prompt)
-        await repo.finish_run(run_id, "awaiting_approval")
-        await repo.write_audit_log(user.id, "chat.awaiting_approval", agent["slug"], {"run_id": run_id})
-        return {"status": "awaiting_approval", "run_id": run_id, "agent": agent["slug"]}
 
     run_id = await repo.create_run(kind="chat", agent_id=agent["id"], triggered_by=user.id, prompt=req.prompt)
     await repo.add_chat_message(run_id, "user", req.prompt)
     model_provider, model_name, tool_call_mode = await repo.get_user_model_preference(user.id)
     asyncio.create_task(run_in_background(run_id, _execute_chat(
-        run_id, agent, match.params, user.id, model_provider, model_name, tool_call_mode, user_role=user.role,
+        run_id, agent, {"prompt": req.prompt}, user.id, model_provider, model_name, tool_call_mode, user_role=user.role,
     )))
     return {"status": "queued", "run_id": run_id, "agent": agent["slug"]}
 
