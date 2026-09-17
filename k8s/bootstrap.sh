@@ -188,6 +188,23 @@ log "Health checks"
 curl -sf http://localhost:4000/health && echo
 curl -sf -o /dev/null -w "frontend HTTP %{http_code}\n" http://localhost:5173/
 
+# local-model-control/agent.py is the host-side bridge the dashboard's
+# "Start model" button and status indicator talk to (runtime/bff run
+# inside kind pods and can't reach the host's process table directly —
+# see that file's own docstring). It's a host-side dev convenience, not
+# part of the container stack, so a missing python3/script here only
+# warns — it never fails the bootstrap.
+log "Checking local-model-control bridge (:8081)"
+if curl -sf http://localhost:8081/status >/dev/null 2>&1; then
+  log "  already running"
+elif command -v python3 >/dev/null && [ -f "$ROOT_DIR/local-model-control/agent.py" ]; then
+  nohup python3 "$ROOT_DIR/local-model-control/agent.py" >/tmp/opssquad-local-model-control.log 2>&1 &
+  disown
+  log "  started (PID $!, log: /tmp/opssquad-local-model-control.log)"
+else
+  log "  WARNING: python3 or local-model-control/agent.py not found — Start-model button won't work until it's run manually"
+fi
+
 if [ -n "$ORIGINAL_CTX" ] && [ "$ORIGINAL_CTX" != "$CTX" ]; then
   kubectl config use-context "$ORIGINAL_CTX" >/dev/null
   log "Restored kubectl current-context to '$ORIGINAL_CTX' (this script used --context=$CTX throughout)"
