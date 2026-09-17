@@ -38,7 +38,7 @@ export default function ToolCallDetail({ tc }) {
 
   return (
     <details className="rounded border border-slate-700 bg-slate-950/50 px-2 py-1.5 text-xs">
-      <summary className="cursor-pointer list-none">
+      <summary className="cursor-pointer">
         {ok ? "✅" : "❌"} <span className="font-mono text-indigo-300">{tc.tool}</span>
         {Object.keys(tc.input || {}).length > 0 && (
           <span className="text-slate-500"> ({Object.entries(tc.input).map(([k, v]) => `${k}=${v}`).join(", ")})</span>
