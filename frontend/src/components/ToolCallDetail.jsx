@@ -18,6 +18,17 @@ function formatValue(v) {
   return String(v);
 }
 
+// One-line gist for the collapsed <summary> — the first entry (or the
+// error), not the full breakdown that's already available on expand.
+function resultGist(ok, error, entries) {
+  if (!ok) return error ? String(error).slice(0, 60) : "failed";
+  if (entries.length === 0) return "done";
+  const [k, v] = entries[0];
+  const val = formatValue(v);
+  const gist = val !== null ? `${k.replace(/_/g, " ")}: ${val}` : "done";
+  return entries.length > 1 ? `${gist}, +${entries.length - 1} more` : gist;
+}
+
 export default function ToolCallDetail({ tc }) {
   const ok = tc.result?.ok !== false;
   const data = tc.result?.data;
@@ -26,13 +37,14 @@ export default function ToolCallDetail({ tc }) {
     : [];
 
   return (
-    <div className="rounded border border-slate-700 bg-slate-950/50 px-2 py-1.5 text-xs">
-      <div>
+    <details className="rounded border border-slate-700 bg-slate-950/50 px-2 py-1.5 text-xs">
+      <summary className="cursor-pointer list-none">
         {ok ? "✅" : "❌"} <span className="font-mono text-indigo-300">{tc.tool}</span>
         {Object.keys(tc.input || {}).length > 0 && (
           <span className="text-slate-500"> ({Object.entries(tc.input).map(([k, v]) => `${k}=${v}`).join(", ")})</span>
         )}
-      </div>
+        <span className="text-slate-500"> — {resultGist(ok, tc.result?.error, entries)}</span>
+      </summary>
       {!ok && <div className="mt-1 text-red-400">{tc.result?.error}</div>}
       {ok && entries.length > 0 && (
         <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5">
@@ -44,6 +56,6 @@ export default function ToolCallDetail({ tc }) {
           })}
         </div>
       )}
-    </div>
+    </details>
   );
 }
