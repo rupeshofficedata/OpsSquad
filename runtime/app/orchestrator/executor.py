@@ -268,9 +268,25 @@ async def _run_simulated(
         return result.output, result.reasoning, result.tool_calls, result.status
 
     # Fallback for any agent row without a matching module in app/agents/ —
-    # just invoke its declared tools and echo their (stub) output.
+    # just invoke its declared tools and echo their (stub) output. No LLM
+    # is making a decision here (that's why we're in this branch at all),
+    # so there is nobody to ask before running a mutating tool and no
+    # in-progress run to pause/resume the way the LLM loops do — refuse
+    # every MUTATING_TOOLS call outright, always, regardless of role or
+    # env. Found live: this generic loop had zero gating and, invoked
+    # against the 'assistant' agent's full tool catalog on a model-
+    # provider fallback (no API key configured), really executed every
+    # declared tool including real kubectl/terraform/docker/helm/argocd/
+    # registry mutations in one shot — see
+    # docs/superpowers/plans/generalist-chat-agent-and-routing-removal.md.
     tool_calls: list[dict[str, Any]] = []
     for name in tool_names:
+        if name in MUTATING_TOOLS:
+            tool_calls.append({
+                "tool": name, "input": params,
+                "result": {"ok": False, "error": "refused: no model available to decide whether to run this mutating action"},
+            })
+            continue
         try:
             tool = get_tool(name)
             result = await tool.run(**params)
