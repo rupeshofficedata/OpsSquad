@@ -4,6 +4,7 @@ No-op if VAULT_ADDR isn't set (plain docker-compose keeps using env vars,
 untouched) or if not actually running in-cluster.
 """
 
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,30 @@ from app.config import settings
 
 SA_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 
+# Dev-mode Vault (k8s/06-vault.yaml) is in-memory, so any Vault pod restart
+# wipes its auth config until k8s/07-vault-init-job.yaml's CronJob rewrites
+# it on its 2-minute cycle. A pod that boots inside that window must ride
+# out transient 403s from the login call instead of crashing — 40 attempts
+# * 5s covers the 2-minute cycle with margin.
+MAX_LOGIN_ATTEMPTS = 40
+LOGIN_RETRY_SECONDS = 5
+_client_kwargs: dict = {}
+
+
+async def _login(client: httpx.AsyncClient, sa_jwt: str) -> str:
+    for attempt in range(MAX_LOGIN_ATTEMPTS):
+        try:
+            login = await client.post(
+                "/v1/auth/kubernetes/login", json={"role": settings.vault_role, "jwt": sa_jwt}
+            )
+            login.raise_for_status()
+            return login.json()["auth"]["client_token"]
+        except httpx.HTTPStatusError:
+            if attempt == MAX_LOGIN_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(LOGIN_RETRY_SECONDS)
+    raise AssertionError("unreachable")  # pragma: no cover
+
 
 async def load_secrets_from_vault() -> None:
     if not settings.vault_addr or not SA_TOKEN_PATH.exists():
@@ -19,12 +44,8 @@ async def load_secrets_from_vault() -> None:
 
     sa_jwt = SA_TOKEN_PATH.read_text().strip()
 
-    async with httpx.AsyncClient(base_url=settings.vault_addr, timeout=10) as client:
-        login = await client.post(
-            "/v1/auth/kubernetes/login", json={"role": settings.vault_role, "jwt": sa_jwt}
-        )
-        login.raise_for_status()
-        vault_token = login.json()["auth"]["client_token"]
+    async with httpx.AsyncClient(base_url=settings.vault_addr, timeout=10, **_client_kwargs) as client:
+        vault_token = await _login(client, sa_jwt)
         headers = {"X-Vault-Token": vault_token}
 
         jwt_data = (await client.get("/v1/secret/data/opssquad/jwt", headers=headers)).json()["data"]["data"]
