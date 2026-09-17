@@ -35,8 +35,8 @@ real container builds and vulnerability scans, real Prometheus alerts.
   every approval decision is visible and permanently logged.
 - 🔐 **Least privilege everywhere** — every credential is scoped to the
   narrowest thing it needs, enforced by the platform, not a policy doc.
-- 🧪 **Works with zero API key** — a built-in keyword router and realistic
-  simulated tool output let you try the whole platform offline.
+- 🧪 **Works with zero API key** — realistic simulated tool output lets you
+  try the whole platform offline, no LLM required.
 - 🖥️ **Bring your own model** — Claude or a self-hosted local LLM, your
   choice, per user.
 

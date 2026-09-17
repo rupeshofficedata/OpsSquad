@@ -2,12 +2,13 @@
 
 # 07 — Agents & Flightplans
 
-## The 15 agents
+## The 15 specialist agents + 1 generalist
 
 Seeded on first boot ([`db/seed.sql`](../../db/seed.sql)); logic lives one
 module per agent under [`runtime/app/agents/`](../../runtime/app/agents/)
 (simulated-mode only — a real LLM run reasons over the tools directly, see
-[Runtime](05-runtime.md)).
+[Runtime](05-runtime.md)). These 15 specialists serve **Flightplans** and
+direct `/agents/{slug}/run` — each narrowly scoped to a few tools.
 
 | Slug | Purpose | Mutating? | Min role |
 |---|---|:---:|---|
@@ -28,8 +29,21 @@ module per agent under [`runtime/app/agents/`](../../runtime/app/agents/)
 | `notify` | Posts a status update to a chat channel | ❌ | viewer |
 
 "Mutating" (`agents.is_mutating` in the DB) drives the **agent-level**
-gate — see [Security](09-security.md) for how that differs from the
-**per-command** gate that checks the actual tool calls an agent makes.
+gate (Flightplan/direct-invoke only) — see [Security](09-security.md) for
+how that differs from the **per-command** gate that checks the actual tool
+calls an agent makes.
+
+### `assistant` — the one agent chat actually uses
+
+Chat doesn't route a prompt to one of the 15 specialists above — it always
+uses one generalist agent, `assistant` (`min_role='viewer'`, the full
+29-tool catalog, no `app/agents/` module — it's meant to be purely
+LLM-driven). Its system prompt tells the model to plan which tool(s)
+answer the question, call them, review the real result, and give a direct
+final answer — see [Runtime](05-runtime.md) and
+[`docs/superpowers/plans/generalist-chat-agent-and-routing-removal.md`](../superpowers/plans/generalist-chat-agent-and-routing-removal.md)
+for why (the old per-prompt keyword router silently misrouted any prompt
+with no keyword overlap against every specialist).
 
 ## Anatomy of a Flightplan
 

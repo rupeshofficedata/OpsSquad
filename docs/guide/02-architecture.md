@@ -27,7 +27,7 @@ flowchart TB
         R1["/chat, /agents/*/run, /flightplans/*"]
         R2["/admin/* (users, roles, audit)"]
         R3["/webhooks/* (GitHub, Alertmanager)"]
-        R4["Orchestrator (intent router, tool-use loop, Flightplan graph)"]
+        R4["Orchestrator (tool-use loop, Flightplan graph)"]
     end
 
     RT --> TOOLS["Tool Layer<br/>kubectl · terraform · trivy · docker · helm · argocd · git · prometheus · ..."]
@@ -78,9 +78,8 @@ sequenceDiagram
     U->>C: free-text prompt
     C->>B: POST /api/chat
     B->>R: POST /chat
-    R->>R: Intent Router → agent_slug + params
-    R->>R: RBAC gate (role >= agent.min_role?)
-    R->>R: Agent-level mutation gate (mutating + env=prod? → pause)
+    R->>R: Always uses one agent: 'assistant' (full tool catalog, no per-prompt routing)
+    R->>R: RBAC gate (role >= agent.min_role — always passes, min_role='viewer')
     loop each round, streamed live over WebSocket
         R->>T: call proposed tool(s)
         alt any call targets a mutating tool
@@ -96,9 +95,21 @@ sequenceDiagram
     R-->>C: final summary (streamed as it completes)
 ```
 
-Two independent gates appear here — the **agent-level** gate (whole agent,
-`prod` only) and the **per-command** gate (any single mutating tool call,
-any env). Both are covered in depth in [Security](09-security.md).
+Chat used to route each prompt to one of 15 specialist agents by keyword
+match; that's gone (`orchestrator/router.py` deleted) — every chat prompt
+now runs against one generalist `assistant` agent with the full tool
+catalog, so the model itself decides what's relevant instead of a
+keyword-score picking one narrow tool subset in advance. See [Agents &
+Flightplans](07-agents-and-flightplans.md).
+
+The **per-command mutation gate** shown above (any single mutating tool
+call, any env) is the only mutation gate chat has — the old whole-run
+"agent-level, `prod`-only" gate was dropped for chat as redundant.
+Flightplans still have their own separate agent-level gate. Both are
+covered in depth in [Security](09-security.md), including a real incident
+found while shipping this: the per-command gate only lives in the live
+LLM paths, and a third path (`_run_simulated`, used when no LLM is
+reachable) had no gating at all until it was fixed.
 
 ## Request flow: a Flightplan run
 

@@ -19,7 +19,6 @@ flowchart TD
     Chat --> Exec[orchestrator/executor.py]
     Agents --> Exec
     FP --> Graph[orchestrator/graph.py]
-    Chat --> Router[orchestrator/router.py]
     Graph --> SafeEval[orchestrator/safe_eval.py]
     Exec --> AgentMods["agents/*.py<br/>(simulated-mode only)"]
     Exec --> ToolReg[tools/registry.py]
@@ -50,7 +49,7 @@ flowchart TD
 
 | File | Purpose |
 |---|---|
-| `chat.py` | `POST /chat` (intent-route + run), `POST /{run_id}/reply` (answer an `ask_user` pause), `POST /{run_id}/approve-command` / `deny-command` (per-command mutation gate — see [Security](09-security.md)). |
+| `chat.py` | `POST /chat` — always runs the one `assistant` agent (`CHAT_AGENT_SLUG`, full tool catalog, no per-prompt routing), `POST /{run_id}/reply` (answer an `ask_user` pause), `POST /{run_id}/approve-command` / `deny-command` (per-command mutation gate — see [Security](09-security.md)). |
 | `agents.py` | `GET /agents`, `POST /agents/{slug}/run` — direct single-agent execution. |
 | `flightplans.py` | List/create/execute a Flightplan, `POST /flightplans/runs/{id}/approve` — resumes past an approval gate. |
 | `runs.py` | `POST /runs/{id}/abort` — cooperative abort, checked between Flightplan steps. |
@@ -61,8 +60,7 @@ flowchart TD
 
 | File | Purpose |
 |---|---|
-| `router.py` | Free-text prompt → agent slug. Uses a cheap Claude call if `ANTHROPIC_API_KEY` is set, otherwise a keyword/stemming matcher — chat works with zero API key. |
-| `executor.py` | **The core tool-use loop.** Runs one agent to completion against Claude, a local OpenAI-compatible server, or the simulated fallback. Owns `MUTATING_TOOLS`, the per-command mutation gate, `execute_paused_round`, `build_resume_messages`, the `ask_user` pseudo-tool. See [Security](09-security.md) and [Agents & Flightplans](07-agents-and-flightplans.md). |
+| `executor.py` | **The core tool-use loop.** Runs one agent to completion against Claude, a local OpenAI-compatible server, or the simulated fallback (`_run_simulated`). Owns `MUTATING_TOOLS`, the per-command mutation gate (Claude/local paths only — `_run_simulated`'s generic fallback refuses mutating calls outright instead, see [Security](09-security.md)), `execute_paused_round`, `build_resume_messages`, the `ask_user` pseudo-tool. See [Agents & Flightplans](07-agents-and-flightplans.md). |
 | `graph.py` | Executes a Flightplan's step graph — dependency order via `needs`, `type: approval` pause/resume, `when`/`policy` evaluation. Passes `pre_approved=True` into `run_agent` so Flightplan steps never hit the per-command chat gate. |
 | `safe_eval.py` | Restricted AST evaluator for `when`/`policy` expressions. **Replaced a real `eval()` sandbox-escape vulnerability** (`().__class__.__bases__[0].__subclasses__()` reached arbitrary classes even with `__builtins__` blocked) — attribute access resolves as a dict-key lookup, never real `getattr()`. Never revert this to `eval()`. |
 
@@ -73,7 +71,10 @@ and no reachable local model) — a real Claude/local-model run reasons over
 the tools itself via `executor.py` instead of being routed through these
 classes. Each encodes the agent's actual pass/fail logic so the rest of the
 platform (RBAC, persistence, Flightplan branching) can be exercised with
-realistic behavior, no LLM required.
+realistic behavior, no LLM required. The chat `assistant` agent
+deliberately has **no** module here — it's meant to be purely LLM-driven;
+if it ever hits simulated mode it falls to `_run_simulated`'s generic
+fallback instead (see [Security](09-security.md)).
 
 | File | Agent slug | What it actually checks |
 |---|---|---|
@@ -119,5 +120,6 @@ Python has no `pytest` installed).
 | `test_safe_eval.py` | The restricted AST evaluator, including the sandbox-escape it closes. |
 | `test_tool_schemas.py` | Every registered tool has a non-empty schema. |
 | `test_vault_retry.py` | Vault login retries through transient 403s, gives up after `MAX_LOGIN_ATTEMPTS`. |
+| `test_simulated_fallback_refuses_mutation.py` | `_run_simulated`'s generic fallback never touches `get_tool()` for a `MUTATING_TOOLS` name — regression test for the live incident, see [Security](09-security.md). |
 
 Next: [Database →](06-database.md) · [Tools →](08-tools.md) · [Security →](09-security.md)

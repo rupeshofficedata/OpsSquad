@@ -94,6 +94,40 @@ Mutating tool set: `kubectl.restart`/`scale`, `terraform.apply`,
 `helm.upgrade`/`rollback`, `argocd.sync`/`rollback`, `docker.build`/`tag`,
 `registry.push`. Full list with real targets: [Tools](08-tools.md).
 
+### Simulated mode has a narrower gate than the live paths
+
+The per-command gate above only lives inside the two LLM tool-use loops
+(`_run_with_claude`/`_run_with_local_llm`). `run_agent()` has a third path —
+`_run_simulated` — used whenever `model_provider` resolves to no working
+LLM (no `ANTHROPIC_API_KEY`, or a local model that's unreachable/erroring).
+For the 15 specialist agents this runs their own scripted `app/agents/`
+class (e.g. `BuildAgent.run()`), a deliberate, narrow, topically-scoped
+stand-in. For any agent with **no** matching class — today, only the chat
+`assistant` agent — it falls to a generic loop that invokes every tool the
+agent declares.
+
+```mermaid
+flowchart TD
+    RA["run_agent()"] --> P{model_provider resolves to a working LLM?}
+    P -->|yes| Loop["_run_with_claude / _run_with_local_llm<br/>— per-command gate applies (see above)"]
+    P -->|no| Sim["_run_simulated"]
+    Sim --> Has{"Agent has an app/agents/ class?"}
+    Has -->|yes, the 15 specialists| Scripted["Runs that class's own narrow, scripted logic"]
+    Has -->|no, e.g. 'assistant'| Generic["Generic fallback: loop over every declared tool"]
+    Generic --> MutCheck{"Tool in MUTATING_TOOLS?"}
+    MutCheck -->|yes| Refuse["Refused outright — no LLM to ask,<br/>no in-progress run to pause/resume"]
+    MutCheck -->|no| Invoke["Invoked normally"]
+```
+
+**Found live, not designed in:** shipping the `assistant` agent (full
+29-tool catalog, reachable by `viewer`) exposed this — a single chat
+message with no working LLM behind it genuinely executed a real `kubectl`
+rollout restart against `redis`, no approval, no pause (confirmed via
+`kubectl get events`). The generic fallback now refuses any
+`MUTATING_TOOLS` call outright instead — see
+[`STATE.md`](../STATE.md) for the incident and fix commit. This applies to
+any agent that could ever hit this fallback, not just `assistant`.
+
 **Known simplification:** if a single round proposes two *different*
 mutating calls (rare), both are approved/denied together as one decision —
 no per-call granularity within a round. Left as a `ponytail:` comment at

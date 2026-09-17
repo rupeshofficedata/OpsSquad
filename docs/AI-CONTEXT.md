@@ -43,29 +43,50 @@ there without a matching STATE.md row, treat it as not yet built.
 
 ## Recent work (most recent first)
 
-1. **Vault login retry** (`runtime/app/vault.py`, `bff/src/vault.js`) — dev-mode
+1. **Generalist chat agent replaces per-prompt routing** (`runtime/app/routes/chat.py`,
+   `db/seed.sql`, `orchestrator/router.py` deleted) — chat always uses one
+   `assistant` agent (full 29-tool catalog, `min_role='viewer'`) instead of
+   a keyword router picking one of 15 narrow specialists per prompt (which
+   silently misrouted any zero-keyword-overlap prompt to `agents[0]`).
+   **Shipping this surfaced a real incident**: `_run_simulated`'s generic
+   fallback (used when no LLM is reachable) had zero mutation gating and
+   genuinely executed a real `kubectl` rollout restart against `redis`
+   from one chat message — confirmed via `kubectl get events`. Fixed same
+   session: that fallback now refuses any `MUTATING_TOOLS` call outright.
+   See [`STATE.md`](STATE.md) and
+   [`guide/09-security.md`](guide/09-security.md#simulated-mode-has-a-narrower-gate-than-the-live-paths).
+2. **Vault login retry** (`runtime/app/vault.py`, `bff/src/vault.js`) — dev-mode
    Vault is in-memory and wipes its auth config on every restart; a CronJob
    (`k8s/07-vault-init-job.yaml`) self-heals it every 2 minutes. Both
    services now retry a failed login every 5s for ~3.3min instead of
    crashing if they boot inside that window. Root-caused from real
    `CrashLoopBackoff` pods in the live kind cluster, not theoretical.
-2. **Per-command mutation gate** (chat) — any mutating tool call
+3. **Per-command mutation gate** (chat) — any mutating tool call
    (`kubectl.scale`, `helm.upgrade`, `terraform.apply`, …) an agent proposes
    mid-chat-run pauses that round for the requesting dev/admin's own
    Approve/Deny, independent of the older agent-level prod-only gate.
    Viewer role gets an inline denial, no pause. Flightplans are never
    gated this way (a step declaring a mutating tool is the advance
    sign-off). See [`guide/09-security.md`](guide/09-security.md).
-3. **Live round-by-round chat streaming** — chat runs stream over the same
+4. **Live round-by-round chat streaming** — chat runs stream over the same
    `/ws/runs/:id` WebSocket the Run Detail page uses, instead of blocking
    on one final response.
-4. **Real tool schemas + strict/lenient local-model mode + multi-turn
+5. **Real tool schemas + strict/lenient local-model mode + multi-turn
    chat (`ask_user`)** — see
    `docs/superpowers/plans/local-model-tool-reliability-and-multiturn-chat.md`,
    fully implemented.
 
 ## Known non-obvious facts (save yourself a wrong assumption)
 
+- **The per-command mutation gate does not cover every code path.** It
+  only lives inside `_run_with_claude`/`_run_with_local_llm`
+  (`executor.py`). The third path, `_run_simulated` (hit whenever
+  `model_provider` resolves to no working LLM), has its own separate,
+  narrower rule: refuse any `MUTATING_TOOLS` call outright, no gate/pause
+  at all — because there's no LLM to ask and no in-progress run to
+  resume. This was a real incident (see "Recent work" above), not a
+  hypothetical — verify against this fact before assuming "the mutation
+  gate covers X" for any new code path that can reach a tool call.
 - **Only one Python service.** An earlier version split admin/webhooks into
   a second Flask service — folded back into FastAPI. Don't look for a
   second Python service.

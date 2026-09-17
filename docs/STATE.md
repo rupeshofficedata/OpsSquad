@@ -17,9 +17,10 @@ Last verified: 2026-09-17.
 |---|---|---|
 | [`per-command-mutation-gate-and-table-rendering.md`](superpowers/plans/per-command-mutation-gate-and-table-rendering.md) | ✅ Done | Merged `1683691`. Every design item confirmed present in code: `MUTATING_TOOLS` set + gate logic (`executor.py`), `execute_paused_round`, `awaiting_command_approval` status (DB enum + repo.py + routes), `/approve-command`/`/deny-command` (BFF + FastAPI), Flightplan `pre_approved=True` bypass, frontend Approve/Deny UI + markdown table rendering. Live-tested: a chat-triggered `kubectl.scale` paused, was approved, executed for real (`kubectl get` confirmed replica count changed). |
 | [`local-model-tool-reliability-and-multiturn-chat.md`](superpowers/plans/local-model-tool-reliability-and-multiturn-chat.md) | ✅ Done | Real per-tool JSON schemas (`tools/schemas.py`), `tool_call_mode` strict/lenient switch, multi-turn chat via `ask_user` + `awaiting_user_input` + `POST /chat/{run_id}/reply`, frontend per-step tool-call rendering (`ToolCallDetail.jsx`). |
+| [`generalist-chat-agent-and-routing-removal.md`](superpowers/plans/generalist-chat-agent-and-routing-removal.md) | ✅ Done, with an unplanned fix on top | Merged `84c0035` + `13925dc`. Chat now uses one `assistant` agent (full 29-tool catalog, `min_role='viewer'`) instead of routing per prompt; `orchestrator/router.py` deleted. Live-tested: a vague viewer prompt got a real, correctly-planned answer with no misroute. See "Unplanned fixes" below — implementing this surfaced a real incident, not just a clean feature ship. |
 
-**No open gap as of this writing** — both plans in `docs/superpowers/plans/`
-are fully implemented and merged. A newly-added plan file with no row here
+**No open gap as of this writing** — every plan in `docs/superpowers/plans/`
+is fully implemented and merged. A newly-added plan file with no row here
 should be treated as **not yet built**.
 
 ## Unplanned fixes shipped since the last plan (not in any plan doc)
@@ -37,6 +38,21 @@ the plan-first flow:
   service tolerated that window before this fix. Verified against real
   `CrashLoopBackoff` pods in the live cluster, both before (crash logs
   captured) and after (0 restarts across a full `bootstrap.sh` re-run).
+
+- **Simulated-mode mutation-gate bypass, found live** (`runtime/app/orchestrator/executor.py`,
+  commit `13925dc`) — `_run_simulated`'s generic fallback (any agent with
+  no `app/agents/` module — only `assistant` today) invoked every
+  declared tool with zero gating whenever `model_provider` resolved to no
+  working LLM. Immediately after shipping the `assistant` agent above,
+  this genuinely executed a real `kubectl` rollout restart against
+  `redis` from one `dev`-role chat message with no approval — confirmed
+  via `kubectl get events`. Root cause: the per-command mutation gate has
+  only ever lived inside the two LLM tool-use loops; this fallback path
+  never had any. Fixed: the fallback now refuses any `MUTATING_TOOLS`
+  call outright (no LLM to ask, no in-progress run to pause/resume — the
+  only sound default). See
+  [`09-security.md`](guide/09-security.md#simulated-mode-has-a-narrower-gate-than-the-live-paths)
+  for the corrected coverage picture.
 
 ## How to use this file
 
