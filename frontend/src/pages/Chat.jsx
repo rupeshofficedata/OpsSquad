@@ -316,9 +316,14 @@ export default function Chat() {
 
       <div className="flex-1 space-y-3 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900/40 p-4">
         {history.length === 0 && (
-          <p className="text-slate-500">
-            Try: "scan the payments-api image for critical CVEs" or "what's the current cluster cost?"
-          </p>
+          <>
+            <p className="text-slate-500">
+              Try: "scan the payments-api image for critical CVEs" or "what's the current cluster cost?"
+            </p>
+            <p className="text-xs text-slate-600">
+              Every action targets this OpsSquad deployment itself (its own namespace, its own source, its own demo config) — there's no other cluster or repo to point it at.
+            </p>
+          </>
         )}
         {history.map((m, i) => (
           <div key={i} className="space-y-1">
