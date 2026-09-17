@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, runStreamUrl } from "../api/client.js";
 import { useAuth } from "../auth/AuthContext.jsx";
+import CommandApprovalBox from "../components/CommandApprovalBox.jsx";
 import FormattedText from "../components/FormattedText.jsx";
 import KeyValueCards from "../components/KeyValueCards.jsx";
+import ReplyBox from "../components/ReplyBox.jsx";
 import ToolCallDetail from "../components/ToolCallDetail.jsx";
 
 const TERMINAL_STATUSES = new Set(["success", "failed", "aborted"]);
@@ -68,54 +70,6 @@ function LiveSteps({ steps }) {
         </div>
       ))}
     </div>
-  );
-}
-
-// A mutating command (see MUTATING_TOOLS in executor.py) the model wants to
-// run — paused for the requesting user's own Approve/Deny before it
-// executes (dedicated buttons, not a free-text reply, since this is a
-// binary yes/no gate on a specific real command).
-function CommandApprovalBox({ busy, onDecide }) {
-  return (
-    <div className="mt-2 flex gap-2">
-      <button
-        onClick={() => onDecide(true)}
-        disabled={busy}
-        className="rounded-md bg-emerald-600 px-3 py-1 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
-      >
-        Approve
-      </button>
-      <button
-        onClick={() => onDecide(false)}
-        disabled={busy}
-        className="rounded-md border border-red-700 px-3 py-1 text-sm text-red-400 hover:bg-red-950 disabled:opacity-50"
-      >
-        Deny
-      </button>
-    </div>
-  );
-}
-
-// Inline reply box for a paused (awaiting_user_input) run — the model
-// called ask_user and is waiting; submitting resumes that same run_id with
-// the full prior tool-use history (see POST /chat/{run_id}/reply).
-function ReplyBox({ busy, onReply }) {
-  const [text, setText] = useState("");
-  return (
-    <form
-      onSubmit={(e) => { e.preventDefault(); if (!text.trim()) return; onReply(text); setText(""); }}
-      className="mt-2 flex gap-2"
-    >
-      <input
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Your answer…"
-        className="flex-1 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm outline-none focus:border-indigo-500"
-      />
-      <button type="submit" disabled={busy} className="rounded-md bg-indigo-600 px-3 py-1 text-sm font-medium hover:bg-indigo-500 disabled:opacity-50">
-        Reply
-      </button>
-    </form>
   );
 }
 

@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api, runStreamUrl } from "../api/client.js";
 import { useAuth } from "../auth/AuthContext.jsx";
+import CommandApprovalBox from "../components/CommandApprovalBox.jsx";
 import FormattedText from "../components/FormattedText.jsx";
 import KeyValueCards from "../components/KeyValueCards.jsx";
+import ReplyBox from "../components/ReplyBox.jsx";
 import ToolCallDetail from "../components/ToolCallDetail.jsx";
 
 export default function RunDetail() {
@@ -12,6 +14,7 @@ export default function RunDetail() {
   const [run, setRun] = useState(null);
   const [steps, setSteps] = useState([]);
   const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let ws;
@@ -61,7 +64,37 @@ export default function RunDetail() {
     }
   }
 
+  // Only chat runs ever pause at awaiting_user_input/awaiting_command_approval
+  // (Flightplan steps are pre_approved — see graph.py) — a chat run reached
+  // via Dashboard used to dead-end here with only Abort, no way to actually
+  // answer/decide (Chat.jsx had ReplyBox/CommandApprovalBox, this page never did).
+  async function handleReply(replyText) {
+    setBusy(true);
+    try {
+      await api.replyToChat(id, replyText);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCommandDecision(approved) {
+    setBusy(true);
+    try {
+      await (approved ? api.approveCommand(id) : api.denyCommand(id));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!run) return <div className="text-slate-400">{error || "Loading…"}</div>;
+
+  const lastStep = steps[steps.length - 1];
+  const question = lastStep?.output?.question;
+  const pendingCommand = lastStep?.output?.pending_command;
 
   return (
     <div className="space-y-6">
@@ -78,7 +111,7 @@ export default function RunDetail() {
               Approve
             </button>
           )}
-          {["queued", "running", "awaiting_approval", "awaiting_user_input"].includes(run.status) && (
+          {["queued", "running", "awaiting_approval", "awaiting_user_input", "awaiting_command_approval"].includes(run.status) && (
             <button onClick={handleAbort} className="rounded-md border border-red-700 px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">
               Abort
             </button>
@@ -90,6 +123,23 @@ export default function RunDetail() {
         <p className="rounded-md border border-slate-800 bg-slate-900/40 p-3 text-sm text-slate-300">
           <span className="text-slate-500">Question: </span>{run.prompt}
         </p>
+      )}
+
+      {run.status === "awaiting_user_input" && (
+        <div className="rounded-md border border-amber-700/50 bg-amber-950/20 p-3">
+          <p className="text-sm text-amber-400">❓ {question}</p>
+          <ReplyBox busy={busy} onReply={handleReply} />
+        </div>
+      )}
+
+      {run.status === "awaiting_command_approval" && pendingCommand && (
+        <div className="rounded-md border border-amber-700/50 bg-amber-950/20 p-3">
+          <p className="text-sm text-amber-400">
+            ⚠️ About to run <span className="font-mono">{pendingCommand.tool}</span>
+            {" "}({Object.entries(pendingCommand.input || {}).map(([k, v]) => `${k}=${v}`).join(", ")})
+          </p>
+          <CommandApprovalBox busy={busy} onDecide={handleCommandDecision} />
+        </div>
       )}
 
       {run.result?.narration && (
