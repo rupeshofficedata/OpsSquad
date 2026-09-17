@@ -334,6 +334,14 @@ export default function Chat() {
               const summary = lastStep?.output?.summary;
               const question = lastStep?.output?.question;
               const pendingCommand = lastStep?.output?.pending_command;
+              // LiveSteps already renders every round's own text, including
+              // the last one — this final marker step's output.summary is
+              // always that same last round's text verbatim (see
+              // _execute_chat in routes/chat.py). Re-rendering it below
+              // duplicated the answer 2-3x. Only show it here when there
+              // were no rounds to begin with (the simulated-mode fallback,
+              // which never calls on_step at all — see _run_simulated).
+              const hasRounds = steps.some((s) => s.reasoning || s.tool_calls?.length > 0);
 
               return (
                 <div className="rounded-md bg-slate-800 p-3 text-sm">
@@ -352,11 +360,11 @@ export default function Chat() {
                       {steps.length > 0 && <LiveSteps steps={steps} />}
                       <div className="mt-2 space-y-2">
                         {items.length > 0 && <ResourceCards items={items} />}
-                        {typeof summary === "string" && summary.trim() ? (
+                        {!hasRounds && (typeof summary === "string" && summary.trim() ? (
                           <FormattedText text={summary} />
                         ) : (
                           !items.length && lastStep?.output && <KeyValueCards data={lastStep.output} />
-                        )}
+                        ))}
                       </div>
                       {status === "awaiting_user_input" && !answeredIndices.has(i) && (
                         <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-950/20 p-2">
