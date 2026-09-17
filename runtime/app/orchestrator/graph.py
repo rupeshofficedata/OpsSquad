@@ -15,7 +15,7 @@ from typing import Any, Coroutine
 
 from app import repo
 from app.config import settings
-from app.orchestrator.executor import run_agent
+from app.orchestrator.executor import run_agent, summarize_run
 from app.orchestrator.safe_eval import evaluate as safe_evaluate
 from app.security import role_at_least
 
@@ -184,7 +184,15 @@ async def _run_steps(
         if "guardrails" in step:
             params["guardrails"] = _resolve_templates(step["guardrails"], context)
 
-        result = await run_agent(agent, params, model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode)
+        # pre_approved=True — a Flightplan step declaring a mutating tool in
+        # its own YAML is the human's advance sign-off (the execute endpoint
+        # already requires role_at_least(user, 'dev') to trigger any
+        # Flightplan at all); a live per-command pause here would just hang
+        # a cron/webhook run with nobody there to answer it.
+        result = await run_agent(
+            agent, params, model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode,
+            user_role=user_role, pre_approved=True,
+        )
         step_status = result["status"]
 
         await repo.add_run_step(
@@ -202,12 +210,14 @@ async def _run_steps(
         # even on a step that didn't separately declare fail_fast.
         stops_pipeline = step.get("fail_fast") or step.get("policy", {}).get("block_on")
         if step_status == "failed" and stops_pipeline:
-            await repo.finish_run(run_id, "failed")
+            narration = await summarize_run(context["steps"], model_provider, model_name)
+            await repo.finish_run(run_id, "failed", {"narration": narration} if narration else None)
             return "failed"
 
     # A step can fail without stopping the pipeline (no fail_fast/block_on),
     # e.g. `verify` failing but `rollback` handling it — that's still a
     # failed run overall, not a clean success, even though nothing aborted.
     final_status = "failed" if any_step_failed else "success"
-    await repo.finish_run(run_id, final_status)
+    narration = await summarize_run(context["steps"], model_provider, model_name)
+    await repo.finish_run(run_id, final_status, {"narration": narration} if narration else None)
     return final_status

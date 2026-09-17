@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, runStreamUrl } from "../api/client.js";
 import { useAuth } from "../auth/AuthContext.jsx";
+import FormattedText from "../components/FormattedText.jsx";
+import KeyValueCards from "../components/KeyValueCards.jsx";
+import ToolCallDetail from "../components/ToolCallDetail.jsx";
 
 const TERMINAL_STATUSES = new Set(["success", "failed", "aborted"]);
 
@@ -36,42 +39,6 @@ function ResourceCards({ items }) {
   );
 }
 
-// Small, targeted formatter for the patterns local-model summaries
-// actually produce (bullet lists, **bold**, `code`) — not a full markdown
-// parser, no new dependency for what's a narrow, observed need.
-function FormattedText({ text }) {
-  const inline = (s, key) => {
-    const parts = s.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean);
-    return (
-      <p key={key} className="text-slate-300">
-        {parts.map((p, j) =>
-          p.startsWith("**") ? <strong key={j} className="text-slate-100">{p.slice(2, -2)}</strong>
-          : p.startsWith("`") ? <code key={j} className="rounded bg-slate-950 px-1 text-indigo-300">{p.slice(1, -1)}</code>
-          : p
-        )}
-      </p>
-    );
-  };
-
-  const lines = text.split("\n");
-  const blocks = [];
-  let list = [];
-  lines.forEach((line, i) => {
-    const bullet = line.match(/^[-*]\s+(.*)/);
-    if (bullet) {
-      list.push(bullet[1]);
-    } else {
-      if (list.length) {
-        blocks.push(<ul key={`ul-${i}`} className="ml-4 list-disc space-y-0.5">{list.map((li, j) => <li key={j} className="text-slate-300">{li}</li>)}</ul>);
-        list = [];
-      }
-      if (line.trim()) blocks.push(inline(line, i));
-    }
-  });
-  if (list.length) blocks.push(<ul key="ul-end" className="ml-4 list-disc space-y-0.5">{list.map((li, j) => <li key={j} className="text-slate-300">{li}</li>)}</ul>);
-  return <div className="space-y-1.5">{blocks}</div>;
-}
-
 // Live, always-visible trace of the whole tool-use loop, one card per
 // round exactly as it was persisted (see executor.py's on_step / routes/
 // chat.py's _execute_chat): the model's reasoning for that round, then
@@ -95,20 +62,36 @@ function LiveSteps({ steps }) {
           {s.reasoning && <p className="mb-1 whitespace-pre-wrap text-slate-300">{s.reasoning}</p>}
           {s.tool_calls?.length > 0 && (
             <div className="space-y-1">
-              {s.tool_calls.map((tc, j) => (
-                <div key={j} className="rounded border border-slate-700 bg-slate-950/50 px-2 py-1">
-                  <div>
-                    {tc.result?.ok === false ? "❌" : "✅"}{" "}
-                    <span className="font-mono text-indigo-300">{tc.tool}</span>
-                    <span className="text-slate-500">({JSON.stringify(tc.input)})</span>
-                  </div>
-                  <div className="mt-0.5 text-slate-400">→ {JSON.stringify(tc.result?.data ?? tc.result?.error)}</div>
-                </div>
-              ))}
+              {s.tool_calls.map((tc, j) => <ToolCallDetail key={j} tc={tc} />)}
             </div>
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+// A mutating command (see MUTATING_TOOLS in executor.py) the model wants to
+// run — paused for the requesting user's own Approve/Deny before it
+// executes (dedicated buttons, not a free-text reply, since this is a
+// binary yes/no gate on a specific real command).
+function CommandApprovalBox({ busy, onDecide }) {
+  return (
+    <div className="mt-2 flex gap-2">
+      <button
+        onClick={() => onDecide(true)}
+        disabled={busy}
+        className="rounded-md bg-emerald-600 px-3 py-1 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
+      >
+        Approve
+      </button>
+      <button
+        onClick={() => onDecide(false)}
+        disabled={busy}
+        className="rounded-md border border-red-700 px-3 py-1 text-sm text-red-400 hover:bg-red-950 disabled:opacity-50"
+      >
+        Deny
+      </button>
     </div>
   );
 }
@@ -133,23 +116,6 @@ function ReplyBox({ busy, onReply }) {
         Reply
       </button>
     </form>
-  );
-}
-
-// A plain structured output (deterministic agents, e.g. diagnose's
-// replicas_ready/recommended_action) rendered as label:value cards
-// instead of a raw JSON dump.
-function KeyValueCards({ data }) {
-  const entries = Object.entries(data).filter(([, v]) => v !== null && v !== undefined);
-  return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-      {entries.map(([k, v]) => (
-        <div key={k} className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1.5 text-xs">
-          <div className="text-slate-500">{k.replace(/_/g, " ")}</div>
-          <div className="truncate text-slate-200" title={String(v)}>{Array.isArray(v) ? v.join(", ") || "—" : String(v)}</div>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -229,7 +195,7 @@ export default function Chat() {
         return;
       }
       setRunsById((r) => ({ ...r, [runId]: data }));
-      if (TERMINAL_STATUSES.has(data.run.status) || data.run.status === "awaiting_user_input") {
+      if (TERMINAL_STATUSES.has(data.run.status) || data.run.status === "awaiting_user_input" || data.run.status === "awaiting_command_approval") {
         setPendingCount((c) => Math.max(0, c - 1));
       }
     };
@@ -271,6 +237,18 @@ export default function Chat() {
       // re-enables a couple seconds before the reply is truly done. Fix if
       // that's ever more than cosmetic: track per-runId pending state keyed
       // off a status transition, not a raw count.
+    } catch (err) {
+      setPendingCount((c) => Math.max(0, c - 1));
+      setHistory((h) => [...h, { role: "error", text: err.message }]);
+    }
+  }
+
+  async function handleCommandDecision(runId, index, approved) {
+    setAnsweredIndices((s) => new Set(s).add(index));
+    setPendingCount((c) => c + 1);
+    try {
+      await (approved ? api.approveCommand(runId) : api.denyCommand(runId));
+      // Same WS-still-open reasoning as handleReply — no need to resubscribe.
     } catch (err) {
       setPendingCount((c) => Math.max(0, c - 1));
       setHistory((h) => [...h, { role: "error", text: err.message }]);
@@ -355,6 +333,7 @@ export default function Chat() {
               const items = allToolCalls.flatMap((tc) => tc.result?.data?.items || []);
               const summary = lastStep?.output?.summary;
               const question = lastStep?.output?.question;
+              const pendingCommand = lastStep?.output?.pending_command;
 
               return (
                 <div className="rounded-md bg-slate-800 p-3 text-sm">
@@ -383,6 +362,15 @@ export default function Chat() {
                         <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-950/20 p-2">
                           <p className="text-sm text-amber-400">❓ {question}</p>
                           <ReplyBox busy={busy} onReply={(text) => handleReply(m.runId, i, text)} />
+                        </div>
+                      )}
+                      {status === "awaiting_command_approval" && !answeredIndices.has(i) && pendingCommand && (
+                        <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-950/20 p-2">
+                          <p className="text-sm text-amber-400">
+                            ⚠️ About to run <span className="font-mono">{pendingCommand.tool}</span>
+                            {" "}({Object.entries(pendingCommand.input || {}).map(([k, v]) => `${k}=${v}`).join(", ")})
+                          </p>
+                          <CommandApprovalBox busy={busy} onDecide={(approved) => handleCommandDecision(m.runId, i, approved)} />
                         </div>
                       )}
                     </>

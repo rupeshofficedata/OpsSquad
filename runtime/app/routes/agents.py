@@ -31,7 +31,14 @@ async def run_agent_direct(slug: str, req: AgentRunRequest, user: User = Depends
 
     run_id = await repo.create_run(kind="chat", agent_id=agent["id"], triggered_by=user.id)
     model_provider, model_name, tool_call_mode = await repo.get_user_model_preference(user.id)
-    result = await run_agent(agent, req.params, model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode)
+    # pre_approved=True — this endpoint is a synchronous direct-run API, not
+    # the interactive chat flow the per-command approval pause is built for
+    # (no background task, nowhere to send an Approve/Deny to). The RBAC
+    # check above already gates who can call this agent at all.
+    result = await run_agent(
+        agent, req.params, model_provider=model_provider, model_name=model_name, tool_call_mode=tool_call_mode,
+        user_role=user.role, pre_approved=True,
+    )
     await repo.add_run_step(
         run_id, 0, slug, result["status"],
         input_data=req.params, output_data=result["output"],

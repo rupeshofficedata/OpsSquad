@@ -36,6 +36,8 @@ export const api = {
     request("/api/chat", { method: "POST", body: JSON.stringify({ prompt, env }) }),
   replyToChat: (runId, reply) =>
     request(`/api/chat/${runId}/reply`, { method: "POST", body: JSON.stringify({ reply }) }),
+  approveCommand: (runId) => request(`/api/chat/${runId}/approve-command`, { method: "POST" }),
+  denyCommand: (runId) => request(`/api/chat/${runId}/deny-command`, { method: "POST" }),
   listFlightplans: () => request("/api/flightplans"),
   executeFlightplan: (slug, inputs) =>
     request(`/api/flightplans/${slug}/execute`, { method: "POST", body: JSON.stringify({ inputs }) }),

@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api, runStreamUrl } from "../api/client.js";
 import { useAuth } from "../auth/AuthContext.jsx";
+import FormattedText from "../components/FormattedText.jsx";
+import KeyValueCards from "../components/KeyValueCards.jsx";
+import ToolCallDetail from "../components/ToolCallDetail.jsx";
 
 export default function RunDetail() {
   const { id } = useParams();
@@ -89,6 +92,13 @@ export default function RunDetail() {
         </p>
       )}
 
+      {run.result?.narration && (
+        <div className="rounded-md border border-indigo-800/50 bg-indigo-950/20 p-3">
+          <p className="mb-1 text-xs uppercase text-indigo-400">Summary</p>
+          <FormattedText text={run.result.narration} />
+        </div>
+      )}
+
       {error && <p className="text-amber-400 text-sm">{error}</p>}
 
       <ol className="space-y-3">
@@ -101,30 +111,14 @@ export default function RunDetail() {
             {s.reasoning && <p className="mt-2 text-sm text-slate-400">{s.reasoning}</p>}
             {s.tool_calls?.length > 0 && (
               <div className="mt-2 space-y-1.5">
-                {s.tool_calls.map((tc, i) => (
-                  <details key={i} className="rounded border border-slate-800 bg-slate-950/50 px-2 py-1.5 text-xs">
-                    <summary className="cursor-pointer text-slate-300">
-                      {tc.result?.ok === false ? "❌" : "✅"} <span className="font-mono">{tc.tool}</span>
-                    </summary>
-                    <div className="mt-1.5 space-y-1">
-                      <div>
-                        <span className="text-slate-500">input: </span>
-                        <code className="text-indigo-300">{JSON.stringify(tc.input)}</code>
-                      </div>
-                      <div>
-                        <span className="text-slate-500">output: </span>
-                        <code className="text-slate-300">{JSON.stringify(tc.result)}</code>
-                      </div>
-                    </div>
-                  </details>
-                ))}
+                {s.tool_calls.map((tc, i) => <ToolCallDetail key={i} tc={tc} />)}
               </div>
             )}
-            {s.output && (
-              <pre className="mt-2 whitespace-pre-wrap text-xs text-slate-500">
-                {JSON.stringify(s.output, null, 2)}
-              </pre>
-            )}
+            {s.output && (typeof s.output.summary === "string" && s.output.summary.trim() ? (
+              <div className="mt-2"><FormattedText text={s.output.summary} /></div>
+            ) : (
+              <div className="mt-2"><KeyValueCards data={s.output} /></div>
+            ))}
           </li>
         ))}
         {steps.length === 0 && <p className="text-slate-500">No steps recorded yet.</p>}

@@ -134,10 +134,21 @@ def _summarize_k8s_item(item: dict[str, Any]) -> dict[str, Any]:
 
     container_statuses = status.get("containerStatuses")
     if container_statuses is not None:  # Pod
+        # `kubectl get pods` doesn't just print status.phase for STATUS — a
+        # terminated container's own reason (e.g. "Completed", "Error")
+        # overrides it, which is why the real CLI shows "Completed" for a
+        # finished Job pod while the raw API phase is still "Succeeded".
+        # Found by diffing this tool's output against real `kubectl get
+        # pods` on opssquad-migrate/opssquad-vault-init.
+        pod_status = status.get("phase")
+        for c in container_statuses:
+            terminated = (c.get("state") or {}).get("terminated") or {}
+            if terminated.get("reason"):
+                pod_status = terminated["reason"]
         return {
             "name": name,
             "ready": f"{sum(1 for c in container_statuses if c.get('ready'))}/{len(container_statuses)}",
-            "status": status.get("phase"),
+            "status": pod_status,
             "restarts": sum(c.get("restartCount", 0) for c in container_statuses),
             "age": age,
         }

@@ -66,7 +66,7 @@ CREATE TABLE flightplans (
 -- RUNS — one execution (chat run OR flightplan run)
 -- ============================================
 CREATE TYPE run_status AS ENUM
-    ('queued','running','awaiting_approval','awaiting_user_input','success','failed','aborted','skipped');
+    ('queued','running','awaiting_approval','awaiting_user_input','awaiting_command_approval','success','failed','aborted','skipped');
 
 CREATE TABLE runs (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

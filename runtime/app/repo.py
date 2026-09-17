@@ -73,14 +73,16 @@ async def create_run(
 
 
 async def mark_run_running(run_id: str) -> None:
-    """Flips a run from 'queued', 'awaiting_approval', or 'awaiting_user_input'
-    (chat resuming from an ask_user pause) to 'running' right as its
-    background task actually starts executing steps. No-ops (via the WHERE
-    guard) if the run was aborted in the gap between being queued and the
-    task getting scheduled."""
+    """Flips a run from 'queued', 'awaiting_approval', 'awaiting_user_input'
+    (chat resuming from an ask_user pause), or 'awaiting_command_approval'
+    (chat resuming from a mutating-command decision) to 'running' right as
+    its background task actually starts executing steps. No-ops (via the
+    WHERE guard) if the run was aborted in the gap between being queued and
+    the task getting scheduled."""
     pool = get_pool()
     await pool.execute(
-        "UPDATE runs SET status = 'running' WHERE id = $1 AND status IN ('queued', 'awaiting_approval', 'awaiting_user_input')",
+        """UPDATE runs SET status = 'running' WHERE id = $1
+           AND status IN ('queued', 'awaiting_approval', 'awaiting_user_input', 'awaiting_command_approval')""",
         run_id,
     )
 
@@ -147,7 +149,7 @@ async def abort_run(run_id: str) -> bool:
     row = await pool.fetchrow(
         """
         UPDATE runs SET status = 'aborted', finished_at = NOW()
-        WHERE id = $1 AND status IN ('queued', 'running', 'awaiting_approval', 'awaiting_user_input')
+        WHERE id = $1 AND status IN ('queued', 'running', 'awaiting_approval', 'awaiting_user_input', 'awaiting_command_approval')
         RETURNING id
         """,
         run_id,
@@ -170,6 +172,17 @@ async def mark_run_awaiting_user_input(run_id: str, question: str) -> None:
         "UPDATE runs SET status = 'awaiting_user_input' WHERE id = $1", run_id,
     )
     await add_chat_message(run_id, "agent", question)
+
+
+async def mark_run_awaiting_command_approval(run_id: str, pending_command: dict[str, Any]) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE runs SET status = 'awaiting_command_approval' WHERE id = $1", run_id,
+    )
+    await add_chat_message(
+        run_id, "agent",
+        f"Wants to run {pending_command['tool']} with {pending_command['input']} — needs your approval.",
+    )
 
 
 async def add_chat_message(run_id: str, role: str, content: str) -> None:

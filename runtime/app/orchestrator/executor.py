@@ -45,9 +45,73 @@ ASK_USER_SCHEMA = {
 }
 ASK_USER_DESCRIPTION = "Ask the user a clarifying question and pause until they reply. Only use when you genuinely can't proceed without their input."
 
+# Any tool that changes real state — everything else (reads/scans) never
+# gates. Checked per round, not per agent: the old is_mutating+prod gate
+# (routes/flightplans.py) is whole-agent and only covers prod; this is
+# finer-grained and applies to chat runs regardless of env.
+MUTATING_TOOLS = {
+    "kubectl.restart", "kubectl.scale",
+    "terraform.apply",
+    "helm.upgrade", "helm.rollback",
+    "argocd.sync", "argocd.rollback",
+    "docker.build", "docker.tag",
+    "registry.push",
+}
+MUTATION_ROLE_BAR = ("dev", "admin")
+
 
 class AgentExecutionError(Exception):
     pass
+
+
+NARRATION_SYSTEM_PROMPT = (
+    "You write short, clear dashboard summaries of DevOps automation runs for a human "
+    "operator. You'll be given the real step-by-step results (JSON) of a Flightplan run — "
+    "what each step actually did and returned. Write a concise markdown summary: what "
+    "happened, what succeeded, what failed, and any real numbers/targets worth calling out. "
+    "Use **bold** labels and '- ' bullet points. Never invent a value that isn't in the data. "
+    "Keep it under 150 words."
+)
+
+
+async def summarize_run(steps: dict[str, Any], model_provider: str, model_name: str | None) -> str | None:
+    """A single one-shot completion (no tool loop) turning a Flightplan run's
+    raw step JSON into a short human-readable dashboard summary — chat runs
+    already get this for free from the agent's own final answer; Flightplan
+    runs never had any narration at all, just raw JSON. Best-effort:
+    narration is decorative, so any failure here (model down, timeout, bad
+    response) returns None rather than breaking the run that's finishing."""
+    prompt = f"Run results:\n{json.dumps(steps, default=str)[:6000]}"
+    try:
+        if model_provider == "local":
+            async with httpx.AsyncClient(timeout=LOCAL_LLM_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{settings.local_llm_base_url}/chat/completions",
+                    json={
+                        "model": model_name or "local-model",
+                        "messages": [
+                            {"role": "system", "content": NARRATION_SYSTEM_PROMPT},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"].get("content") or None
+        elif model_provider == "anthropic" and settings.anthropic_api_key:
+            import anthropic
+
+            client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+            response = await client.messages.create(
+                model=model_name or settings.agent_model,
+                max_tokens=400,
+                system=NARRATION_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text_blocks = [b.text for b in response.content if b.type == "text"]
+            return "\n".join(text_blocks) or None
+    except Exception:
+        return None
+    return None
 
 
 def build_resume_messages(model_provider: str, messages: list[dict[str, Any]], reply: str) -> list[dict[str, Any]]:
@@ -62,6 +126,60 @@ def build_resume_messages(model_provider: str, messages: list[dict[str, Any]], r
         return messages + [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": ask_block["id"], "content": reply}]}]
     call = next(c for c in last["tool_calls"] if c["function"]["name"] == ASK_USER_TOOL_NAME)
     return messages + [{"role": "tool", "tool_call_id": call["id"], "content": reply}]
+
+
+async def execute_paused_round(
+    model_provider: str, messages: list[dict[str, Any]], approved: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Resumes a round paused on a mutating-command approval (see
+    MUTATING_TOOLS above). `messages[-1]` is the still-unanswered assistant
+    turn — derives every call proposed that round (same pattern as
+    build_resume_messages), executes each for real: the mutating one per
+    `approved`, everything else normally, since it was never denied, just
+    held alongside it (a provider requires every tool call in one turn
+    answered before the next). Returns (updated messages, the tool_calls
+    actually executed this round) for the caller to persist/stream the same
+    as a normal on_step round.
+
+    ponytail: if a round proposes two different mutating calls, both are
+    approved/denied together as one decision — no per-call granularity.
+    Revisit only if that's actually hit in practice."""
+    last = messages[-1]
+    round_tool_calls: list[dict[str, Any]] = []
+
+    async def run_one(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name in MUTATING_TOOLS and not approved:
+            return {"ok": False, "error": "Denied by user."}
+        try:
+            tool = get_tool(name)
+            result = await tool.run(**args)
+            return result.model_dump()
+        except KeyError:
+            return {"ok": False, "error": f"tool '{name}' not registered"}
+
+    if model_provider == "anthropic":
+        tool_use_blocks = [b for b in last["content"] if b.get("type") == "tool_use"]
+        tool_results = []
+        for block in tool_use_blocks:
+            args = block.get("input") or {}
+            result_payload = await run_one(block["name"], args)
+            round_tool_calls.append({"tool": block["name"], "input": args, "result": result_payload})
+            tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": str(result_payload)})
+        messages = messages + [{"role": "user", "content": tool_results}]
+    else:
+        appended = []
+        for call in last.get("tool_calls") or []:
+            name = call["function"]["name"]
+            try:
+                args = json.loads(call["function"].get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            result_payload = await run_one(name, args)
+            round_tool_calls.append({"tool": name, "input": args, "result": result_payload})
+            appended.append({"role": "tool", "tool_call_id": call["id"], "content": str(result_payload)})
+        messages = messages + appended
+
+    return messages, round_tool_calls
 
 
 # Called after each tool-use round with (that round's reasoning text, that
@@ -79,6 +197,8 @@ async def run_agent(
     allow_ask_user: bool = False,
     history: list[dict[str, Any]] | None = None,
     on_step: OnStep | None = None,
+    user_role: str | None = None,
+    pre_approved: bool = False,
 ) -> dict[str, Any]:
     """agent: a row from the `agents` table (as dict). params: caller-supplied args.
 
@@ -88,16 +208,21 @@ async def run_agent(
     allow_ask_user / history: see ASK_USER_TOOL_NAME above and
     routes/chat.py's POST /chat + POST /chat/{run_id}/reply.
     on_step: see OnStep above.
+    user_role / pre_approved: see MUTATING_TOOLS above. pre_approved=True
+    for Flightplan runs (the YAML step declaring a mutating tool is the
+    human's advance sign-off — see graph.py) — chat runs pause instead.
     """
     start = time.monotonic()
     tool_names: list[str] = agent["tools"] if isinstance(agent["tools"], list) else []
     asked_question: str | None = None
+    pending_command: dict[str, Any] | None = None
     messages_out: list[dict[str, Any]] | None = None
 
     if model_provider == "local":
         try:
-            output, reasoning, tool_calls, asked_question, messages_out = await _run_with_local_llm(
+            output, reasoning, tool_calls, asked_question, pending_command, messages_out = await _run_with_local_llm(
                 agent, params, tool_names, model_name, tool_call_mode, allow_ask_user, history, on_step,
+                user_role, pre_approved,
             )
             status = "success"  # same caveat as Claude below — we don't parse free text for pass/fail
         except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
@@ -108,14 +233,16 @@ async def run_agent(
             output, reasoning, tool_calls, status = await _run_simulated(agent, params, tool_names)
             reasoning = f"Local LLM at {settings.local_llm_base_url} failed ({exc}) — ran simulated instead. {reasoning}"
     elif model_provider == "anthropic" and settings.anthropic_api_key:
-        output, reasoning, tool_calls, asked_question, messages_out = await _run_with_claude(
-            agent, params, tool_names, model_name, allow_ask_user, history, on_step,
+        output, reasoning, tool_calls, asked_question, pending_command, messages_out = await _run_with_claude(
+            agent, params, tool_names, model_name, allow_ask_user, history, on_step, user_role, pre_approved,
         )
         status = "success"  # Claude reasons freely over the tools; we don't parse its text for pass/fail
     else:
         output, reasoning, tool_calls, status = await _run_simulated(agent, params, tool_names)
 
-    if asked_question:
+    if pending_command:
+        status = "awaiting_command_approval"
+    elif asked_question:
         status = "awaiting_user_input"
 
     duration_ms = int((time.monotonic() - start) * 1000)
@@ -126,6 +253,7 @@ async def run_agent(
         "tool_calls": tool_calls,
         "duration_ms": duration_ms,
         "asked_question": asked_question,
+        "pending_command": pending_command,
         "messages": messages_out,
     }
 
@@ -164,7 +292,8 @@ async def _run_simulated(
 async def _run_with_claude(
     agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None,
     allow_ask_user: bool = False, history: list[dict[str, Any]] | None = None, on_step: "OnStep | None" = None,
-) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None, list[dict[str, Any]]]:
+    user_role: str | None = None, pre_approved: bool = False,
+) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None, dict[str, Any] | None, list[dict[str, Any]]]:
     import anthropic
 
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
@@ -183,6 +312,7 @@ async def _run_with_claude(
     reasoning_parts: list[str] = []
     final_text = ""
     asked_question: str | None = None
+    pending_command: dict[str, Any] | None = None
 
     for _ in range(MAX_TOOL_ITERATIONS):
         response = await client.messages.create(
@@ -218,15 +348,30 @@ async def _run_with_claude(
                 await on_step(round_text, [])
             break
 
+        # A round proposing any mutating call must pause entirely, before
+        # running ANYTHING in it — the API requires every tool_use in this
+        # turn get an answer before the next one, so partial execution
+        # would leave the round structurally unresumable.
+        if not pre_approved:
+            gate_block = next((b for b in tool_use_blocks if b.name in MUTATING_TOOLS), None)
+            if gate_block and (user_role in MUTATION_ROLE_BAR):
+                pending_command = {"tool": gate_block.name, "input": gate_block.input}
+                if on_step:
+                    await on_step(round_text, [])
+                break
+
         round_tool_calls: list[dict[str, Any]] = []
         tool_results = []
         for block in tool_use_blocks:
-            try:
-                tool = get_tool(block.name)
-                result = await tool.run(**(block.input or {}))
-                result_payload = result.model_dump()
-            except KeyError:
-                result_payload = {"ok": False, "error": f"tool '{block.name}' not registered"}
+            if block.name in MUTATING_TOOLS and not pre_approved and user_role not in MUTATION_ROLE_BAR:
+                result_payload = {"ok": False, "error": f"tool '{block.name}' requires dev role or higher (you are '{user_role or 'viewer'}')"}
+            else:
+                try:
+                    tool = get_tool(block.name)
+                    result = await tool.run(**(block.input or {}))
+                    result_payload = result.model_dump()
+                except KeyError:
+                    result_payload = {"ok": False, "error": f"tool '{block.name}' not registered"}
 
             entry = {"tool": block.name, "input": block.input, "result": result_payload}
             tool_calls.append(entry)
@@ -238,7 +383,7 @@ async def _run_with_claude(
         if on_step:
             await on_step(round_text, round_tool_calls)
 
-    return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, messages
+    return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, pending_command, messages
 
 
 # Any (or no) fence language tag — observed live: ```xml wrapping a JSON
@@ -359,8 +504,8 @@ def _extract_content_tool_calls(content: str) -> list[dict[str, Any]]:
 async def _run_with_local_llm(
     agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None,
     tool_call_mode: str = "lenient", allow_ask_user: bool = False, history: list[dict[str, Any]] | None = None,
-    on_step: "OnStep | None" = None,
-) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None, list[dict[str, Any]]]:
+    on_step: "OnStep | None" = None, user_role: str | None = None, pre_approved: bool = False,
+) -> tuple[dict[str, Any], str, list[dict[str, Any]], str | None, dict[str, Any] | None, list[dict[str, Any]]]:
     """Same tool-use loop as Claude, against an OpenAI-compatible
     /chat/completions endpoint (llama-server, Ollama, vLLM, ...). The wire
     format differs from Anthropic's: tool calls arrive as
@@ -396,6 +541,7 @@ async def _run_with_local_llm(
     reasoning_parts: list[str] = []
     final_text = ""
     asked_question: str | None = None
+    pending_command: dict[str, Any] | None = None
     seen_call_signatures: set[str] = set()
     fallback_call_counter = 0
     stopped_cleanly = False
@@ -477,6 +623,22 @@ async def _run_with_local_llm(
                     await on_step(round_text, [])
                 break
 
+            # Same all-or-nothing-per-round rule as Claude: a round
+            # proposing any mutating call must pause entirely before
+            # running anything in it, since every call in this message
+            # needs an answer before the next one.
+            if not pre_approved:
+                gate_call = next((c for c in calls if c["function"]["name"] in MUTATING_TOOLS), None)
+                if gate_call and (user_role in MUTATION_ROLE_BAR):
+                    try:
+                        gate_args = json.loads(gate_call["function"].get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        gate_args = {}
+                    pending_command = {"tool": gate_call["function"]["name"], "input": gate_args}
+                    if on_step:
+                        await on_step(round_text, [])
+                    break
+
             round_tool_calls: list[dict[str, Any]] = []
             for call in calls:
                 name = call["function"]["name"]
@@ -485,12 +647,15 @@ async def _run_with_local_llm(
                 except json.JSONDecodeError:
                     call_args = {}
 
-                try:
-                    tool = get_tool(name)
-                    result = await tool.run(**call_args)
-                    result_payload = result.model_dump()
-                except KeyError:
-                    result_payload = {"ok": False, "error": f"tool '{name}' not registered"}
+                if name in MUTATING_TOOLS and not pre_approved and user_role not in MUTATION_ROLE_BAR:
+                    result_payload = {"ok": False, "error": f"tool '{name}' requires dev role or higher (you are '{user_role or 'viewer'}')"}
+                else:
+                    try:
+                        tool = get_tool(name)
+                        result = await tool.run(**call_args)
+                        result_payload = result.model_dump()
+                    except KeyError:
+                        result_payload = {"ok": False, "error": f"tool '{name}' not registered"}
 
                 entry = {"tool": name, "input": call_args, "result": result_payload}
                 tool_calls.append(entry)
@@ -522,4 +687,4 @@ async def _run_with_local_llm(
         # structured field, so this fires often under strict mode).
         final_text += "\n\n⚠️ Model tried to call a tool as plain text, not a real structured tool call — strict mode ignored it. Nothing was executed. Switch to lenient mode, or use Claude, if you want this to actually run."
 
-    return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, messages
+    return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, pending_command, messages
