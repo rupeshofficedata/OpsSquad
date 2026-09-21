@@ -1,0 +1,31 @@
+# Argo CD fixture for the test namespace. Source is the public
+# argoproj/argocd-example-apps `guestbook` (plain manifests with no hard-coded
+# namespace, so they land in opssquad-test). scripts/test-env.sh syncs it at an
+# older revision then at HEAD so argocd.rollback has a prior revision to use.
+# The runtime may only get/patch THIS Application (resourceNames), not all of them.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: { name: argocd-test, namespace: argocd }
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps.git
+    targetRevision: HEAD
+    path: guestbook
+  destination: { server: "https://kubernetes.default.svc", namespace: opssquad-test }
+  syncPolicy: {}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: runtime-test-argocd-sync, namespace: argocd }
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    resourceNames: ["argocd-test"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: runtime-test-argocd-sync, namespace: argocd }
+subjects: [{ kind: ServiceAccount, name: runtime, namespace: opssquad-test }]
+roleRef: { kind: Role, name: runtime-test-argocd-sync, apiGroup: rbac.authorization.k8s.io }
