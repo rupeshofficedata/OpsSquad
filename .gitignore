@@ -8,3 +8,6 @@ runtime/terraform-demo/.terraform/
 runtime/terraform-demo/state/
 runtime/terraform-demo/terraform.tfstate*
 core.[0-9]*
+
+# local eval run output
+evals/results/
