@@ -17,6 +17,7 @@ users.model_provider) that decides how their agent runs execute:
 """
 
 import json
+import logging
 import re
 import time
 from typing import Any, Awaitable, Callable
@@ -29,8 +30,17 @@ from app.tools import get_tool
 from app.tools.schemas import TOOL_SCHEMAS
 from app.tools.stubs import SIMULATED_TOOLS
 
+logger = logging.getLogger(__name__)
+
 MAX_TOOL_ITERATIONS = 8
-LOCAL_LLM_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=5.0)
+LOCAL_LLM_TIMEOUT = httpx.Timeout(connect=5.0, read=settings.local_llm_read_timeout, write=10.0, pool=5.0)
+# Same tool called this many times in one run = the model is looping, not learning.
+MAX_CALLS_PER_TOOL = 4
+DENIED_MARKER = "Denied by user."
+FINAL_ANSWER_NUDGE = (
+    "Stop calling tools. Using only the tool results above, answer the original question "
+    "and say plainly anything that blocked you or that you could not check."
+)
 
 # A real declared tool, not prose-parsing — lets the model pause a run and
 # ask the person something instead of guessing. Only ever added to tool_defs
@@ -363,6 +373,49 @@ async def _run_simulated(
     return output, reasoning, tool_calls, "success"
 
 
+def _denied_tools(messages: list[dict[str, Any]]) -> set[str]:
+    """Tools whose call the user already denied earlier in this run (either
+    wire format). A denied tool is not re-proposed: the model gets an error
+    saying so instead of pausing the run for the same approval again."""
+    names_by_id: dict[str, str] = {}
+    denied: set[str] = set()
+    for m in messages:
+        content = m.get("content")
+        if m.get("role") == "assistant":
+            for c in m.get("tool_calls") or []:
+                names_by_id[c["id"]] = c["function"]["name"]
+            for b in content if isinstance(content, list) else []:
+                if b.get("type") == "tool_use":
+                    names_by_id[b["id"]] = b["name"]
+        elif m.get("role") == "tool" and DENIED_MARKER in str(content):
+            denied.add(names_by_id.get(m.get("tool_call_id"), ""))
+        elif m.get("role") == "user" and isinstance(content, list):
+            for b in content:
+                if b.get("type") == "tool_result" and DENIED_MARKER in str(b.get("content")):
+                    denied.add(names_by_id.get(b.get("tool_use_id"), ""))
+    denied.discard("")
+    return denied
+
+
+def _trim_old_tool_output(messages: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:
+    """A copy of `messages` with the oldest tool outputs shortened until the
+    total fits max_chars, so a long run cannot overflow the model's context
+    window (observed: n_tokens hit the server cap and the request was
+    truncated). The latest round is never trimmed."""
+    total = sum(len(str(m.get("content") or "")) for m in messages)
+    if total <= max_chars:
+        return messages
+    last_assistant = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1)
+    out = list(messages)
+    for i, m in enumerate(out[:last_assistant]):
+        if total <= max_chars:
+            break
+        if m.get("role") == "tool" and len(str(m["content"])) > 300:
+            total -= len(str(m["content"])) - 300
+            out[i] = {**m, "content": str(m["content"])[:300] + " ...[older output trimmed]"}
+    return out
+
+
 async def _run_with_claude(
     agent: dict[str, Any], params: dict[str, Any], tool_names: list[str], model_name: str | None,
     allow_ask_user: bool = False, history: list[dict[str, Any]] | None = None, on_step: "OnStep | None" = None,
@@ -387,6 +440,7 @@ async def _run_with_claude(
     final_text = ""
     asked_question: str | None = None
     pending_command: dict[str, Any] | None = None
+    denied = _denied_tools(messages)
 
     for _ in range(MAX_TOOL_ITERATIONS):
         response = await client.messages.create(
@@ -426,8 +480,8 @@ async def _run_with_claude(
         # running ANYTHING in it — the API requires every tool_use in this
         # turn get an answer before the next one, so partial execution
         # would leave the round structurally unresumable.
-        if not pre_approved:
-            gate_block = next((b for b in tool_use_blocks if b.name in MUTATING_TOOLS), None)
+        if not pre_approved and settings.approval_mode != "auto":
+            gate_block = next((b for b in tool_use_blocks if b.name in MUTATING_TOOLS and b.name not in denied), None)
             if gate_block and (user_role in MUTATION_ROLE_BAR):
                 pending_command = {"tool": gate_block.name, "input": gate_block.input}
                 if on_step:
@@ -437,7 +491,9 @@ async def _run_with_claude(
         round_tool_calls: list[dict[str, Any]] = []
         tool_results = []
         for block in tool_use_blocks:
-            if block.name in MUTATING_TOOLS and not pre_approved and user_role not in MUTATION_ROLE_BAR:
+            if block.name in denied:
+                result_payload = {"ok": False, "error": f"the user already denied '{block.name}' in this run; it was not run. Do not retry it: tell the user it was not done."}
+            elif block.name in MUTATING_TOOLS and not pre_approved and user_role not in MUTATION_ROLE_BAR:
                 result_payload = {"ok": False, "error": f"tool '{block.name}' requires dev role or higher (you are '{user_role or 'viewer'}')"}
             else:
                 try:
@@ -456,6 +512,21 @@ async def _run_with_claude(
         messages.append({"role": "user", "content": tool_results})
         if on_step:
             await on_step(round_text, round_tool_calls)
+    else:
+        # Step cap reached with the model still calling tools: one last call
+        # with tools disabled so the user gets an answer, not a dangling round.
+        try:
+            response = await client.messages.create(
+                model=model_name or settings.agent_model, max_tokens=1024, system=agent["system_prompt"],
+                tools=tool_defs, tool_choice={"type": "none"},
+                messages=[*messages, {"role": "user", "content": FINAL_ANSWER_NUDGE}],
+            )
+            concluded = "\n".join(b.text for b in response.content if b.type == "text")
+            if concluded.strip():
+                final_text = concluded
+                reasoning_parts.append(concluded)
+        except Exception:  # keep whatever the loop produced rather than failing a run that already did its work
+            logger.exception("forced-conclusion call failed")
 
     return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, pending_command, messages
 
@@ -619,6 +690,9 @@ async def _run_with_local_llm(
     seen_call_signatures: set[str] = set()
     fallback_call_counter = 0
     stopped_cleanly = False
+    stopped_on_repeat = False
+    denied = _denied_tools(messages)
+    call_counts: dict[str, int] = {}
 
     async with httpx.AsyncClient(timeout=LOCAL_LLM_TIMEOUT) as client:
         for _ in range(MAX_TOOL_ITERATIONS):
@@ -626,7 +700,7 @@ async def _run_with_local_llm(
                 f"{settings.local_llm_base_url}/chat/completions",
                 json={
                     "model": model_name or "local-model",
-                    "messages": messages,
+                    "messages": _trim_old_tool_output(messages, settings.local_llm_max_history_chars),
                     "tools": tool_defs,
                     "tool_choice": "auto",
                 },
@@ -678,8 +752,11 @@ async def _run_with_local_llm(
                 # Qwen2.5-Coder-7B) — without this, that burns every
                 # iteration on identical repeated no-op calls.
                 signatures = {call["function"]["name"] + "|" + (call["function"].get("arguments") or "") for call in calls}
-                if signatures <= seen_call_signatures:
-                    stopped_cleanly = True
+                looping = signatures <= seen_call_signatures or any(
+                    call_counts.get(c["function"]["name"], 0) >= MAX_CALLS_PER_TOOL for c in calls
+                )
+                if looping:
+                    stopped_cleanly = stopped_on_repeat = True
                     if on_step:
                         await on_step(round_text, [])
                     break
@@ -701,8 +778,8 @@ async def _run_with_local_llm(
             # proposing any mutating call must pause entirely before
             # running anything in it, since every call in this message
             # needs an answer before the next one.
-            if not pre_approved:
-                gate_call = next((c for c in calls if c["function"]["name"] in MUTATING_TOOLS), None)
+            if not pre_approved and settings.approval_mode != "auto":
+                gate_call = next((c for c in calls if c["function"]["name"] in MUTATING_TOOLS and c["function"]["name"] not in denied), None)
                 if gate_call and (user_role in MUTATION_ROLE_BAR):
                     try:
                         gate_args = json.loads(gate_call["function"].get("arguments") or "{}")
@@ -721,7 +798,10 @@ async def _run_with_local_llm(
                 except json.JSONDecodeError:
                     call_args = {}
 
-                if name in MUTATING_TOOLS and not pre_approved and user_role not in MUTATION_ROLE_BAR:
+                call_counts[name] = call_counts.get(name, 0) + 1
+                if name in denied:
+                    result_payload = {"ok": False, "error": f"the user already denied '{name}' in this run; it was not run. Do not retry it: tell the user it was not done."}
+                elif name in MUTATING_TOOLS and not pre_approved and user_role not in MUTATION_ROLE_BAR:
                     result_payload = {"ok": False, "error": f"tool '{name}' requires dev role or higher (you are '{user_role or 'viewer'}')"}
                 else:
                     try:
@@ -738,17 +818,41 @@ async def _run_with_local_llm(
             if on_step:
                 await on_step(round_text, round_tool_calls)
 
+    # A "clean" stop isn't always a real answer — observed live: the model's
+    # last proposal used invalid JSON (Python-style single-quoted list) so it
+    # silently failed to parse into a call, the loop correctly saw "no calls"
+    # and stopped, but final_text is still that broken proposal, not prose.
+    final_looks_unexecuted = "<function " in final_text or (
+        "```" in final_text and "arguments" in final_text and ('"name"' in final_text or "'name'" in final_text)
+    )
+    concluded_ok = False
+    if tool_calls and not asked_question and not pending_command and (
+        not stopped_cleanly or stopped_on_repeat or final_looks_unexecuted
+    ):
+        # Cap hit, a repeat loop, or no real prose: one last call with no tools
+        # so the user gets an answer built from the real results already gathered.
+        try:
+            async with httpx.AsyncClient(timeout=LOCAL_LLM_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{settings.local_llm_base_url}/chat/completions",
+                    json={
+                        "model": model_name or "local-model",
+                        "messages": [
+                            *_trim_old_tool_output(messages, settings.local_llm_max_history_chars),
+                            {"role": "user", "content": FINAL_ANSWER_NUDGE},
+                        ],
+                    },
+                )
+                resp.raise_for_status()
+            concluded = resp.json()["choices"][0]["message"].get("content") or ""
+        except (httpx.HTTPError, KeyError, ValueError):
+            concluded = ""
+        if concluded.strip() and not _extract_content_tool_calls(concluded):
+            final_text, concluded_ok = concluded, True
+            reasoning_parts.append(concluded)
+
     if lenient:
-        # A "clean" stop isn't always a real answer — observed live: the
-        # model's last proposal used invalid JSON (Python-style single-quoted
-        # list) so it silently failed to parse into a call, the loop correctly
-        # saw "no calls" and stopped, but final_text is still that broken
-        # proposal, not prose. Treat that the same as running out of
-        # iterations: prefer the real tool results already collected.
-        final_looks_unexecuted = "<function " in final_text or (
-            "```" in final_text and "arguments" in final_text and ('"name"' in final_text or "'name'" in final_text)
-        )
-        if tool_calls and (not stopped_cleanly or final_looks_unexecuted):
+        if tool_calls and not concluded_ok and (not stopped_cleanly or final_looks_unexecuted):
             final_text = f"Model did not produce a final summary after {MAX_TOOL_ITERATIONS} tool-call rounds. Real tool results:\n" + "\n".join(
                 f"- {tc['tool']}({tc['input']}) -> {tc['result'].get('data') or tc['result'].get('error')}" for tc in tool_calls
             )

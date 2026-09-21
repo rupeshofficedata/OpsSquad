@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from croniter import croniter
 
 from app import repo
+from app.config import settings
 from app.orchestrator.graph import execute_flightplan, run_in_background
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,11 @@ async def run_scheduler() -> None:
             await _tick(last_checked)
         except Exception:
             logger.exception("scheduler tick failed")
+        try:
+            if n := await repo.abort_stale_paused_runs(settings.paused_run_ttl_minutes):
+                logger.info("aborted %d paused run(s) past the %d min TTL", n, settings.paused_run_ttl_minutes)
+        except Exception:
+            logger.exception("paused-run TTL sweep failed")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 

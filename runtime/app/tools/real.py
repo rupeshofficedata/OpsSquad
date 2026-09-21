@@ -226,6 +226,9 @@ class RealKubectlRestart(Tool):
             target = _safe_arg(kwargs.get("target") or settings.kube_mutate_target)
         except UnsafeArgError as exc:
             return ToolResult(ok=False, error=str(exc))
+        if target.rsplit("/", 1)[-1] == "runtime":
+            # This process IS that deployment: restarting it kills the current run mid-flight.
+            return ToolResult(ok=False, error="refusing to restart the runtime deployment: it is the process running this agent. Restart it manually.")
         code, _, err = await _run(
             "kubectl", "rollout", "restart", "-n", settings.kube_namespace, "--", target
         )
@@ -391,7 +394,7 @@ class RealHelmRollback(Tool):
         )
 
 
-_ARGOCD_APP = ("application", "argocd-demo", "-n", "argocd")
+_ARGOCD_APP = ("application", settings.argocd_app, "-n", settings.argocd_namespace)
 
 
 async def _argocd_wait_synced(timeout: float = 30.0) -> bool:
@@ -415,7 +418,7 @@ class RealArgocdSync(Tool):
         if code != 0:
             return ToolResult(ok=False, error=err[:500])
         synced = await _argocd_wait_synced()
-        return ToolResult(ok=synced, data={"app": "argocd-demo", "real": True} if synced else None,
+        return ToolResult(ok=synced, data={"app": settings.argocd_app, "real": True} if synced else None,
                            error=None if synced else "sync did not reach 'Synced' before timeout")
 
 
@@ -447,7 +450,7 @@ class RealArgocdRollback(Tool):
         if code != 0:
             return ToolResult(ok=False, error=err[:500])
         synced = await _argocd_wait_synced()
-        return ToolResult(ok=synced, data={"app": "argocd-demo", "rolled_back_to": previous_revision, "real": True} if synced else None,
+        return ToolResult(ok=synced, data={"app": settings.argocd_app, "rolled_back_to": previous_revision, "real": True} if synced else None,
                            error=None if synced else "rollback sync did not reach 'Synced' before timeout")
 
 
@@ -522,7 +525,7 @@ class RealPagerdutyRead(Tool):
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    f"https://api.pagerduty.com/incidents/{incident_id}",
+                    f"{settings.pagerduty_api_url}/incidents/{incident_id}",
                     headers={"Authorization": f"Token token={settings.pagerduty_api_token}", "Accept": "application/vnd.pagerduty+json;version=2"},
                 )
         except httpx.HTTPError as exc:
@@ -706,6 +709,8 @@ class RealPrometheusQuery(Tool):
         return ToolResult(ok=True, data={
             "query": query, "error_rate": error_rate, "p99_latency_ms": None,
             "series_returned": total, "real": True,
+            # the raw values, so a question like "what is X right now?" is answerable
+            "samples": [{"metric": r.get("metric"), "value": (r.get("value") or [None, None])[1]} for r in result[:20]],
         })
 
 

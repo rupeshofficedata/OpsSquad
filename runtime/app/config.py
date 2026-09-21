@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     # --port 8080` speaks this API natively. Used only when a user's
     # model_provider is 'local'.
     local_llm_base_url: str = "http://localhost:8080/v1"
+    # Read timeout per completion (a long-thinking model needs more than 120s)
+    # and the chars of message history sent per request before old tool output
+    # is trimmed (keeps the prompt inside the server's context window).
+    local_llm_read_timeout: float = 120.0
+    local_llm_max_history_chars: int = 16000
+    # A run paused on approval / ask_user is auto-aborted after this long.
+    paused_run_ttl_minutes: int = 30
 
     # Real tool integrations (kubectl/terraform/trivy) — see app/tools/real.py
     # for exactly what each targets and why. False keeps every tool
@@ -53,9 +60,36 @@ class Settings(BaseSettings):
     vault_addr: str = ""
     vault_role: str = "opssquad-runtime"
 
+    # Test-namespace switches (k8s/test/). Defaults keep production behavior.
+    # approval_mode='auto' skips the per-command approval *pause* (the
+    # dev/admin role check still applies); check_approval_mode() refuses it
+    # anywhere but the opssquad-test namespace.
+    environment: str = "prod"
+    approval_mode: str = "manual"  # manual | auto
+    # Base URL / target overrides so the tools can point at sandbox services.
+    pagerduty_api_url: str = "https://api.pagerduty.com"
+    argocd_app: str = "argocd-demo"
+    argocd_namespace: str = "argocd"
+
     class Config:
         env_file = ".env"
         extra = "ignore"
+
+
+
+TEST_NAMESPACE = "opssquad-test"
+
+
+def check_approval_mode(mode: str, environment: str, namespace: str) -> None:
+    """approval_mode='auto' lets the model run mutating commands with no human
+    pause, so it is only ever allowed inside the disposable test namespace."""
+    if mode not in ("manual", "auto"):
+        raise RuntimeError(f"APPROVAL_MODE must be 'manual' or 'auto', got {mode!r}")
+    if mode == "auto" and not (environment == "test" and namespace == TEST_NAMESPACE):
+        raise RuntimeError(
+            f"APPROVAL_MODE=auto is only allowed with ENVIRONMENT=test in the {TEST_NAMESPACE!r} "
+            f"namespace (got ENVIRONMENT={environment!r}, KUBE_NAMESPACE={namespace!r})"
+        )
 
 
 settings = Settings()

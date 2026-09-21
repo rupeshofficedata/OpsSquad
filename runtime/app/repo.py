@@ -88,6 +88,36 @@ async def mark_run_running(run_id: str) -> None:
     )
 
 
+async def abort_stale_paused_runs(ttl_minutes: int) -> int:
+    """Nobody answered a chat ask_user / command-approval pause within the TTL:
+    abort it instead of leaving it 'awaiting_*' forever (the dashboard listed
+    such runs for days). Flightplan approvals are left alone: a human may
+    legitimately take longer."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """UPDATE runs SET status = 'aborted', finished_at = NOW(),
+                  result = jsonb_build_object('error', 'paused run timed out after ' || $2::text || ' minutes without an answer')
+           WHERE status IN ('awaiting_user_input', 'awaiting_command_approval')
+             AND started_at < NOW() - make_interval(mins => $1) RETURNING id""",
+        ttl_minutes, str(ttl_minutes),
+    )
+    return len(rows)
+
+
+async def fail_orphaned_runs() -> int:
+    """At startup nothing can still be executing, so any run left 'running'
+    was killed with the previous process (a deploy, a crash, or the agent
+    restarting its own deployment). Without this it stays 'running' forever.
+    Assumes one runtime replica. Paused runs (awaiting_*) are kept: they resume from the DB."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """UPDATE runs SET status = 'failed', finished_at = NOW(),
+                  result = jsonb_build_object('error', 'runtime restarted while this run was executing')
+           WHERE status = 'running' RETURNING id"""
+    )
+    return len(rows)
+
+
 async def finish_run(run_id: str, status: str, result: dict[str, Any] | None = None) -> None:
     pool = get_pool()
     await pool.execute(

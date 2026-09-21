@@ -4,8 +4,9 @@ from fastapi import FastAPI
 
 import asyncio
 
-from app.config import INSECURE_DEFAULT_JWT_SECRET, settings
+from app.config import INSECURE_DEFAULT_JWT_SECRET, check_approval_mode, settings
 from app.db import close_pool, init_pool
+from app.repo import fail_orphaned_runs
 from app.routes import admin, agents, chat, flightplans, runs, webhooks
 from app.scheduler import run_scheduler
 from app.vault import load_secrets_from_vault
@@ -19,7 +20,9 @@ async def lifespan(app: FastAPI):
             "JWT_SECRET is not configured (or still the old public placeholder). "
             "Set it via .env or Vault — refusing to start with an unsafe default."
         )
+    check_approval_mode(settings.approval_mode, settings.environment, settings.kube_namespace)
     await init_pool()
+    await fail_orphaned_runs()
     scheduler_task = asyncio.create_task(run_scheduler())
     yield
     scheduler_task.cancel()

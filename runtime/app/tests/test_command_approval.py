@@ -50,3 +50,11 @@ def test_deny_only_gates_the_mutating_call_others_still_run():
     assert round_tool_calls[0]["tool"] == "git.log"
     assert round_tool_calls[0]["result"] != {"ok": False, "error": "Denied by user."}
     assert round_tool_calls[1] == {"tool": "kubectl.scale", "input": {"target": "deployment/redis", "replicas": 5}, "result": {"ok": False, "error": "Denied by user."}}
+
+
+def test_restart_refuses_own_deployment():
+    from app.tools.real import RealKubectlRestart
+
+    for target in ("deployment/runtime", "deployments.apps/runtime", "runtime"):
+        r = asyncio.run(RealKubectlRestart().run(target=target))
+        assert not r.ok and "runtime deployment" in r.error
