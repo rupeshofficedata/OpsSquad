@@ -111,7 +111,10 @@ export default function Chat() {
   const [modelSaving, setModelSaving] = useState(false);
   const [modelNameDraft, setModelNameDraft] = useState(user.model_name || "");
   const [modelStatus, setModelStatus] = useState(null);
+  const [models, setModels] = useState([]); // [{name, size_mb}] the host can serve
+  const [activeModel, setActiveModel] = useState(null);
   const [starting, setStarting] = useState(false);
+  const [modelError, setModelError] = useState(null);
   const [answeredIndices, setAnsweredIndices] = useState(new Set());
   // The root run's id of the thread this page is continuing, or null for
   // a not-yet-started one — see routes/chat.py's build_thread_history.
@@ -170,19 +173,50 @@ export default function Chat() {
   useEffect(() => {
     if (user.model_provider !== "local") return;
     let cancelled = false;
-    const poll = () => api.getModelStatus().then((r) => { if (!cancelled) setModelStatus(r.state); }).catch(() => {});
+    const poll = () => api.listModels().then((r) => {
+      if (cancelled) return;
+      setModelStatus(r.state);
+      setModels(r.models || []);
+      setActiveModel(r.active || null);
+    }).catch(() => {});
     poll();
     const id = setInterval(poll, 5000);
     return () => { cancelled = true; clearInterval(id); };
   }, [user.model_provider]);
 
-  async function handleStartModel() {
+  // Loads the model picked in the dropdown (stopping whichever is loaded now).
+  async function handleLoadModel() {
     setStarting(true);
+    setModelError(null);
     try {
-      const r = await api.startModel();
+      const r = await api.loadModel(modelNameDraft);
       setModelStatus(r.state);
+      setActiveModel(modelNameDraft);
+    } catch (err) {
+      setModelError(err.message || "Could not load the model");
     } finally {
       setStarting(false);
+    }
+  }
+
+  async function handleStopModel() {
+    setStarting(true);
+    try {
+      const r = await api.stopModel();
+      setModelStatus(r.state);
+      setActiveModel(null);
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function handleModelPick(name) {
+    setModelNameDraft(name);
+    setModelSaving(true);
+    try {
+      updateUser(await api.updateModelPreference("local", name || null));
+    } finally {
+      setModelSaving(false);
     }
   }
 
@@ -322,13 +356,31 @@ export default function Chat() {
           </select>
           {user.model_provider === "local" && (
             <>
-              <input
-                value={modelNameDraft}
-                onChange={(e) => setModelNameDraft(e.target.value)}
-                onBlur={handleModelNameBlur}
-                placeholder="model label, e.g. qwen2.5-coder:7b"
-                className="w-44 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
-              />
+              {models.length > 0 ? (
+                <select
+                  value={models.some((m) => m.name === modelNameDraft) ? modelNameDraft : ""}
+                  onChange={(e) => handleModelPick(e.target.value)}
+                  disabled={modelSaving}
+                  title="Models found on this machine (~/models). Pick one, then Load."
+                  className="w-72 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
+                >
+                  <option value="" disabled>Select a model…</option>
+                  {models.map((m) => (
+                    <option key={m.name} value={m.name}>
+                      {m.name.replace(/\.gguf$/, "")} ({(m.size_mb / 1024).toFixed(1)} GB){m.name === activeModel ? " • loaded" : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={modelNameDraft}
+                  onChange={(e) => setModelNameDraft(e.target.value)}
+                  onBlur={handleModelNameBlur}
+                  placeholder="model label (model control agent not reachable)"
+                  title="The host-side control agent (local-model-control/agent.py) isn't reachable, so the model list is unavailable."
+                  className="w-56 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-sm"
+                />
+              )}
               <select
                 value={user.tool_call_mode || "lenient"}
                 onChange={(e) => handleToolCallModeChange(e.target.value)}
@@ -344,13 +396,27 @@ export default function Chat() {
                 title={`model: ${modelStatus || "unknown"}`}
               />
               <span className="text-xs text-slate-400">{modelStatus || "unknown"}</span>
-              <button
-                onClick={handleStartModel}
-                disabled={modelStatus !== "stopped" || starting}
-                className="rounded-md border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800 disabled:opacity-40"
-              >
-                {starting ? "Starting…" : "Start model"}
-              </button>
+              {models.length > 0 && (
+                <>
+                  <button
+                    onClick={handleLoadModel}
+                    disabled={!modelNameDraft || modelStatus === "loading" || starting || (modelStatus === "running" && modelNameDraft === activeModel) || user.role === "viewer"}
+                    title={user.role === "viewer" ? "Loading a model needs the dev role" : "Stops the loaded model (if any) and loads the selected one"}
+                    className="rounded-md border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800 disabled:opacity-40"
+                  >
+                    {starting || modelStatus === "loading" ? "Loading…" : "Load model"}
+                  </button>
+                  <button
+                    onClick={handleStopModel}
+                    disabled={modelStatus === "stopped" || starting || user.role === "viewer"}
+                    title="Stop the model server and free its memory"
+                    className="rounded-md border border-slate-700 px-2 py-1 text-xs hover:bg-slate-800 disabled:opacity-40"
+                  >
+                    Stop
+                  </button>
+                  {modelError && <span className="text-xs text-red-400">{modelError}</span>}
+                </>
+              )}
             </>
           )}
           <select

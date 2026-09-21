@@ -31,6 +31,9 @@ export const api = {
     request("/api/me/model", { method: "PATCH", body: JSON.stringify({ provider, model, toolCallMode }) }),
   getModelStatus: () => request("/api/model/status"),
   startModel: () => request("/api/model/start", { method: "POST" }),
+  listModels: () => request("/api/model/list"),
+  loadModel: (model) => request("/api/model/load", { method: "POST", body: JSON.stringify({ model }) }),
+  stopModel: () => request("/api/model/stop", { method: "POST" }),
   listAgents: () => request("/api/agents"),
   chat: (prompt, env = "staging", threadId = null) =>
     request("/api/chat", { method: "POST", body: JSON.stringify({ prompt, env, thread_id: threadId }) }),
