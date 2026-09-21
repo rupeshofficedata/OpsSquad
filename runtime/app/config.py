@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # and the chars of message history sent per request before old tool output
     # is trimmed (keeps the prompt inside the server's context window).
     local_llm_read_timeout: float = 120.0
-    local_llm_max_history_chars: int = 16000
+    local_llm_max_history_chars: int = 10000
     # A run paused on approval / ask_user is auto-aborted after this long.
     paused_run_ttl_minutes: int = 30
 

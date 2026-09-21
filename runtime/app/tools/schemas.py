@@ -32,6 +32,11 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "argocd.rollback": _schema(),
     "http.smoke_test": _schema(),
     "alertmanager.read": _schema(),
+    "prometheus.targets": _schema(),
+    "registry.list": _schema(),
+    "kubectl.events": _schema({"warnings_only": {"type": "boolean", "description": "Only Warning events", "default": False}}),
+    "kubectl.describe": _schema({"target": _TARGET}, required=["target"]),
+    "pagerduty.list": _schema({"statuses": {"type": "array", "items": {"type": "string"}, "description": "e.g. ['triggered','acknowledged','resolved']"}}),
     "terraform.plan": _schema(),
     "terraform.apply": _schema(),
     "cloud.cost_explorer": _schema(),
@@ -57,7 +62,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "kubectl.get": _schema({"target": _TARGET}, required=["target"]),
     "kubectl.restart": _schema({"target": _TARGET}, required=["target"]),
     "kubectl.logs": _schema(
-        {"target": _TARGET, "tail": {"type": "integer", "description": "Trailing log lines to return", "default": 200}},
+        {"target": _TARGET, "tail": {"type": "integer", "description": "Trailing log lines to read", "default": 200},
+         "previous": {"type": "boolean", "description": "Logs of the previous (crashed) container", "default": False}},
         required=["target"],
     ),
     "kubectl.scale": _schema(

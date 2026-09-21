@@ -17,18 +17,38 @@ metadata:
   name: runtime-agent
   namespace: opssquad
 rules:
+  # Read-only view for kubectl.get/logs/events/describe.
   - apiGroups: [""]
-    resources: ["pods", "pods/log"]
+    resources: ["pods", "pods/log", "events", "services"]
     verbs: ["get", "list"]
   - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+  # Changes are limited to the two deployments the tools are meant to touch:
+  # `redis` (kubectl.scale/restart target) and `canary` (helm release). The
+  # runtime cannot scale, restart or delete itself, bff, postgres, etc.
+  - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale"]
-    # create/delete added for the real helm.upgrade/rollback target
-    # (k8s/charts/canary) — Helm creates the Deployment on first install
-    # and can delete it on rollback/uninstall, not just patch an existing
-    # one the way kubectl.restart/scale do.
-    verbs: ["get", "list", "create", "patch", "update", "delete"]
+    resourceNames: ["redis", "canary"]
+    verbs: ["get", "patch", "update", "delete"]
+  # helm.upgrade/rollback: create is not name-restrictable (the object does not
+  # exist yet); release state lives in Secrets named sh.helm.release.v1.canary.*
+  # whose revision suffix changes, so those cannot be pinned by name either.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create"]
   - apiGroups: [""]
-    resources: ["secrets", "services"]
+    resources: ["services"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["canary"]
+    verbs: ["update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

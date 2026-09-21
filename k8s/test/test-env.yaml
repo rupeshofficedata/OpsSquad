@@ -29,6 +29,7 @@ data:
   MUTATING_AGENTS_ENABLED: "true"
   REAL_TOOLS_ENABLED: "true"
   LOCAL_LLM_BASE_URL: "http://172.18.0.1:8080/v1"
+  LOCAL_LLM_READ_TIMEOUT: "300"  # a slow local model (thinking) can exceed the 120s default
   MODEL_CONTROL_URL: "http://172.18.0.1:8081"
   # --- test-only switches (runtime refuses APPROVAL_MODE=auto anywhere else) ---
   ENVIRONMENT: "test"
@@ -128,8 +129,12 @@ spec:
             - |
               set -e
               until pg_isready -h postgres -U opssquad; do sleep 2; done
-              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /sql/001_init.sql
-              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /sql/seed.sql
+              if [ "$(psql "$DATABASE_URL" -tAc "SELECT to_regclass('public.agents') IS NOT NULL")" = t ]; then
+                echo "schema already applied"
+              else
+                psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /sql/001_init.sql
+                psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /sql/seed.sql
+              fi
           env:
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: opssquad-secrets, key: DATABASE_URL } }

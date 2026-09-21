@@ -33,7 +33,13 @@
         "example output",
         "assuming the output",
         "hypothetical"
-      ]
+      ],
+      "test": {
+        "must_match": [
+          "crashy",
+          "crash|error|restart|backoff|imagepull"
+        ]
+      }
     },
     {
       "id": "Q02",
@@ -359,7 +365,15 @@
       ],
       "must_match": [
         "opssquad-docker-demo|can't|cannot|unable|no (tool|way|capability)|not able|limited|don't have|do not have"
-      ]
+      ],
+      "test": {
+        "expect_tools_any": [
+          "registry.list"
+        ],
+        "must_match": [
+          "opssquad-demo"
+        ]
+      }
     },
     {
       "id": "Q18",
@@ -531,6 +545,77 @@
         "expect_tools_any": [],
         "must_match": []
       }
+    },
+    {
+      "id": "Q26",
+      "phase": 3,
+      "category": "incident-scenario",
+      "prompt": "a pod keeps restarting. find out which one and why",
+      "expect_tools_any": [
+        "kubectl.logs",
+        "kubectl.describe",
+        "kubectl.events"
+      ],
+      "min_tools": 2,
+      "truth_cmds": [
+        "{K} get pods",
+        "{K} logs deploy/crashy --tail=5"
+      ],
+      "truth_note": "Only meaningful in the test namespace: `crashy` exits 1 with 'cannot open /etc/crashy/config.yaml'. In dev nothing restarts, so an honest 'none found' is the right answer.",
+      "must_not_match": [
+        "INC-?\\d+"
+      ],
+      "test": {
+        "must_match": [
+          "crashy",
+          "config\\.yaml|no such file|exit"
+        ]
+      }
+    },
+    {
+      "id": "Q27",
+      "phase": 3,
+      "category": "release",
+      "prompt": "what images and tags are in our container registry",
+      "expect_tools_any": [
+        "registry.list"
+      ],
+      "truth_cmds": [
+        "{K} exec deploy/runtime -- python -c \"import urllib.request;print(urllib.request.urlopen('http://registry:5000/v2/_catalog').read().decode())\""
+      ],
+      "truth_note": "Compare the repositories the model lists with the catalog."
+    },
+    {
+      "id": "Q28",
+      "phase": 3,
+      "category": "incident",
+      "prompt": "list the open pagerduty incidents",
+      "expect_tools_any": [
+        "pagerduty.list"
+      ],
+      "truth_cmds": [],
+      "truth_note": "Dev has no PagerDuty configured: the model must say so. Test env mock has PTEST001 (triggered).",
+      "must_not_match": [
+        "INC-?\\d+"
+      ],
+      "test": {
+        "must_match": [
+          "PTEST001"
+        ]
+      }
+    },
+    {
+      "id": "Q29",
+      "phase": 3,
+      "category": "observability",
+      "prompt": "which prometheus scrape targets are down",
+      "expect_tools_any": [
+        "prometheus.targets"
+      ],
+      "truth_cmds": [
+        "{K} exec deploy/runtime -- python -c \"import urllib.request;print(urllib.request.urlopen('http://prometheus:9090/api/v1/targets').read().decode()[:600])\""
+      ],
+      "truth_note": "Compare with /api/v1/targets health values."
     }
   ]
 }

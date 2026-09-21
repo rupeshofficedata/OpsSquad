@@ -13,6 +13,7 @@ account. Stdlib only.
 import json
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 TOKEN = "Token token=test-token"
 NOW = datetime.now(timezone.utc)
@@ -59,7 +60,8 @@ class H(BaseHTTPRequestHandler):
                 return self._send(401, {"error": {"message": "Unauthorized", "code": 2006}})
             rest = p[len("/pagerduty/"):]
             if rest == "incidents":
-                return self._send(200, {"incidents": list(INCIDENTS.values())})
+                wanted = parse_qs(urlparse(self.path).query).get("statuses[]")
+                return self._send(200, {"incidents": [i for i in INCIDENTS.values() if not wanted or i["status"] in wanted]})
             inc = INCIDENTS.get(rest.removeprefix("incidents/"))
             if inc:
                 return self._send(200, {"incident": inc})

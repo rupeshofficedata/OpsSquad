@@ -86,7 +86,8 @@ INSERT INTO agents (slug, name, description, system_prompt, tools, is_mutating, 
        "trivy.scan","docker.build","docker.tag","helm.upgrade","helm.rollback","argocd.sync","argocd.rollback",
        "cloud.cost_explorer","slack.post","pagerduty.read","git.diff","git.log","secrets.scan","lint.run",
        "test.run","test.select","registry.push","registry.pull","iac.scan","http.smoke_test",
-       "prometheus.query","alertmanager.read","runs.read"]',
+       "prometheus.query","prometheus.targets","alertmanager.read","runs.read",
+       "kubectl.events","kubectl.describe","registry.list","pagerduty.list"]',
      TRUE, 'viewer', 300)
 ON CONFLICT (slug) DO NOTHING;
 

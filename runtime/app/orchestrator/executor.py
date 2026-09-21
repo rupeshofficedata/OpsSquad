@@ -27,6 +27,7 @@ import httpx
 from app.agents import AgentContext, get_agent_impl
 from app.config import settings
 from app.tools import get_tool
+from app.tools.redact import redact_text
 from app.tools.schemas import TOOL_SCHEMAS
 from app.tools.stubs import SIMULATED_TOOLS
 
@@ -306,6 +307,9 @@ async def run_agent(
     else:
         output, reasoning, tool_calls, status = await _run_simulated(agent, params, tool_names)
         simulated = True
+
+    if isinstance(output.get("summary"), str):
+        output["summary"] = redact_text(output["summary"])
 
     if pending_command:
         status = "awaiting_command_approval"
@@ -693,21 +697,32 @@ async def _run_with_local_llm(
     stopped_on_repeat = False
     denied = _denied_tools(messages)
     call_counts: dict[str, int] = {}
+    llm_error: Exception | None = None
+    cut_off = False
 
     async with httpx.AsyncClient(timeout=LOCAL_LLM_TIMEOUT) as client:
         for _ in range(MAX_TOOL_ITERATIONS):
-            resp = await client.post(
-                f"{settings.local_llm_base_url}/chat/completions",
-                json={
-                    "model": model_name or "local-model",
-                    "messages": _trim_old_tool_output(messages, settings.local_llm_max_history_chars),
-                    "tools": tool_defs,
-                    "tool_choice": "auto",
-                },
-            )
-            resp.raise_for_status()
-            message = resp.json()["choices"][0]["message"]
+            try:
+                resp = await client.post(
+                    f"{settings.local_llm_base_url}/chat/completions",
+                    json={
+                        "model": model_name or "local-model",
+                        "messages": _trim_old_tool_output(messages, settings.local_llm_max_history_chars),
+                        "tools": tool_defs,
+                        "tool_choice": "auto",
+                    },
+                )
+                resp.raise_for_status()
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+                if not tool_calls:
+                    raise  # nothing ran yet: run_agent falls back to simulated, as before
+                llm_error = exc  # tools already ran for real: keep those results instead of replacing them with a simulation
+                break
+            choice = resp.json()["choices"][0]
+            message = choice["message"]
             round_text = message.get("content") or ""
+            # finish_reason 'length' = the context window or output limit was hit and the reply is cut off
+            cut_off = choice.get("finish_reason") == "length"
 
             if message.get("content"):
                 reasoning_parts.append(message["content"])
@@ -826,7 +841,14 @@ async def _run_with_local_llm(
         "```" in final_text and "arguments" in final_text and ('"name"' in final_text or "'name'" in final_text)
     )
     concluded_ok = False
-    if tool_calls and not asked_question and not pending_command and (
+    if llm_error:
+        final_text = (
+            f"The model server failed after {len(tool_calls)} tool call(s) ({type(llm_error).__name__}: {llm_error}), "
+            "so there is no model-written answer. Real tool results so far:\n" + "\n".join(
+                f"- {tc['tool']}({tc['input']}) -> {tc['result'].get('data') or tc['result'].get('error')}" for tc in tool_calls
+            )
+        )
+    elif tool_calls and not asked_question and not pending_command and (
         not stopped_cleanly or stopped_on_repeat or final_looks_unexecuted
     ):
         # Cap hit, a repeat loop, or no real prose: one last call with no tools
@@ -852,7 +874,7 @@ async def _run_with_local_llm(
             reasoning_parts.append(concluded)
 
     if lenient:
-        if tool_calls and not concluded_ok and (not stopped_cleanly or final_looks_unexecuted):
+        if tool_calls and not concluded_ok and not llm_error and (not stopped_cleanly or final_looks_unexecuted):
             final_text = f"Model did not produce a final summary after {MAX_TOOL_ITERATIONS} tool-call rounds. Real tool results:\n" + "\n".join(
                 f"- {tc['tool']}({tc['input']}) -> {tc['result'].get('data') or tc['result'].get('error')}" for tc in tool_calls
             )
@@ -864,5 +886,8 @@ async def _run_with_local_llm(
         # models essentially always write calls this way, never the real
         # structured field, so this fires often under strict mode).
         final_text += "\n\n⚠️ Model tried to call a tool as plain text, not a real structured tool call — strict mode ignored it. Nothing was executed. Switch to lenient mode, or use Claude, if you want this to actually run."
+
+    if cut_off and final_text:
+        final_text += "\n\n⚠️ The model's context window filled up, so this answer is cut off. Ask a narrower question, or raise the server's context size (-c)."
 
     return {"summary": final_text}, "\n".join(reasoning_parts), tool_calls, asked_question, pending_command, messages

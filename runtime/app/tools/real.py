@@ -87,6 +87,22 @@ async def _run(*args: str, timeout: float = SUBPROCESS_TIMEOUT) -> tuple[int, st
     return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
+async def _with_hint(err: str, target: str) -> str:
+    """A kubectl NotFound plus the names that do exist for that kind. Models
+    often pass a pod name where a deployment name belongs (~8 NotFound errors
+    in run history); listing the real names lets the next call succeed."""
+    msg = err[:500]
+    if "NotFound" not in err or "/" not in target:
+        return msg
+    kind, name = target.split("/", 1)
+    code, out, _ = await _run("kubectl", "get", kind, "-n", settings.kube_namespace, "-o", "name")
+    if code != 0:
+        return msg
+    names = [line.split("/", 1)[-1] for line in out.split()]
+    close = [n for n in names if n in name or name in n]
+    return msg + f" Did you mean: {', '.join(f'{kind}/{n}' for n in (close or names)[:8])}?"
+
+
 def _human_age(creation_timestamp: str | None) -> str | None:
     if not creation_timestamp:
         return None
@@ -171,7 +187,7 @@ class RealKubectlGet(Tool):
             return ToolResult(ok=False, error=str(exc))
         code, out, err = await _run("kubectl", "get", "-n", settings.kube_namespace, "-o", "json", "--", target)
         if code != 0:
-            return ToolResult(ok=False, error=err[:500])
+            return ToolResult(ok=False, error=await _with_hint(err, target))
         obj = json.loads(out)
 
         if obj.get("kind", "").endswith("List"):
@@ -196,6 +212,21 @@ class RealKubectlGet(Tool):
         })
 
 
+_LOG_ERROR_RE = re.compile(r"error|fatal|exception|panic|traceback|refused|denied|timed? ?out|no such file", re.I)
+
+
+def _summarize_logs(text: str, tail_lines: int = 40, error_lines: int = 10, width: int = 300) -> dict[str, Any]:
+    """Bounded view of a log: the last `tail_lines` lines plus the last
+    `error_lines` error-looking ones, so the model sees the actual failure
+    text and not just a count (the old result had counts only)."""
+    lines = [line[:width] for line in text.splitlines()]
+    errors = [line for line in lines if _LOG_ERROR_RE.search(line)]
+    return {
+        "lines_returned": len(lines), "error_count": len(errors),
+        "error_lines": errors[-error_lines:], "tail": lines[-tail_lines:],
+    }
+
+
 class RealKubectlLogs(Tool):
     name = "kubectl.logs"
 
@@ -205,16 +236,58 @@ class RealKubectlLogs(Tool):
             tail = _safe_int(kwargs.get("tail", 200), minimum=1)
         except (UnsafeArgError, ValueError, TypeError) as exc:
             return ToolResult(ok=False, error=str(exc))
+        previous = ["--previous"] if kwargs.get("previous") else []
         code, out, err = await _run(
-            "kubectl", "logs", "-n", settings.kube_namespace, f"--tail={tail}", "--", target
+            "kubectl", "logs", "-n", settings.kube_namespace, f"--tail={tail}", *previous, "--", target
         )
         if code != 0:
-            return ToolResult(ok=False, error=err[:500])
-        lines = out.splitlines()
-        error_count = sum(1 for line in lines if "error" in line.lower())
+            return ToolResult(ok=False, error=await _with_hint(err, target))
         return ToolResult(ok=True, data={
-            "namespace": settings.kube_namespace,
-            "lines_returned": len(lines), "error_count": error_count, "target": target, "real": True,
+            "namespace": settings.kube_namespace, "target": target, "real": True, **_summarize_logs(out),
+        })
+
+
+def _summarize_events(items: list[dict[str, Any]], warnings_only: bool = False, limit: int = 30) -> list[dict[str, Any]]:
+    def when(e: dict[str, Any]) -> str:
+        return e.get("lastTimestamp") or e.get("eventTime") or e.get("metadata", {}).get("creationTimestamp") or ""
+
+    if warnings_only:
+        items = [e for e in items if e.get("type") == "Warning"]
+    return [
+        {
+            "type": e.get("type"), "reason": e.get("reason"),
+            "object": f"{e.get('involvedObject', {}).get('kind', '')}/{e.get('involvedObject', {}).get('name', '')}".lower(),
+            "message": (e.get("message") or "")[:200], "count": e.get("count", 1), "last_seen": _human_age(when(e)),
+        }
+        for e in sorted(items, key=when)[-limit:]
+    ]
+
+
+class RealKubectlEvents(Tool):
+    name = "kubectl.events"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        code, out, err = await _run("kubectl", "get", "events", "-n", settings.kube_namespace, "-o", "json")
+        if code != 0:
+            return ToolResult(ok=False, error=err[:500])
+        events = _summarize_events(json.loads(out).get("items", []), bool(kwargs.get("warnings_only")))
+        return ToolResult(ok=True, data={"namespace": settings.kube_namespace, "events": events, "count": len(events), "real": True})
+
+
+class RealKubectlDescribe(Tool):
+    name = "kubectl.describe"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        try:
+            target = _safe_arg(kwargs.get("target") or settings.kube_read_target)
+        except UnsafeArgError as exc:
+            return ToolResult(ok=False, error=str(exc))
+        code, out, err = await _run("kubectl", "describe", "-n", settings.kube_namespace, "--", target)
+        if code != 0:
+            return ToolResult(ok=False, error=await _with_hint(err, target))
+        return ToolResult(ok=True, data={
+            "namespace": settings.kube_namespace, "target": target, "text": out[:2000],
+            "truncated": len(out) > 2000, "real": True,
         })
 
 
@@ -235,7 +308,7 @@ class RealKubectlRestart(Tool):
         return ToolResult(
             ok=code == 0,
             data={"namespace": settings.kube_namespace, "target": target, "real": True} if code == 0 else None,
-            error=None if code == 0 else err[:500],
+            error=None if code == 0 else await _with_hint(err, target),
         )
 
 
@@ -254,7 +327,7 @@ class RealKubectlScale(Tool):
         return ToolResult(
             ok=code == 0,
             data={"namespace": settings.kube_namespace, "target": target, "replicas": replicas, "real": True} if code == 0 else None,
-            error=None if code == 0 else err[:500],
+            error=None if code == 0 else await _with_hint(err, target),
         )
 
 
@@ -299,6 +372,9 @@ class RealTrivyScan(Tool):
             path = _safe_arg(kwargs.get("scan_path", settings.trivy_scan_path))
         except UnsafeArgError as exc:
             return ToolResult(ok=False, error=str(exc))
+        root = Path(settings.trivy_scan_path).resolve()
+        if root != Path(path).resolve() and root not in Path(path).resolve().parents:
+            return ToolResult(ok=False, error=f"scan_path {path!r} is outside what this deployment scans. Omit scan_path to scan {settings.trivy_scan_path}.")
         code, out, err = await _run(
             "trivy", "fs", "--format", "json", "--scanners", "vuln", "--quiet", "--", path,
             timeout=120.0,
@@ -734,14 +810,87 @@ class RealAlertmanagerRead(Tool):
             "alertname": labels.get("alertname", "none"),
             "summary": first.get("annotations", {}).get("summary", ""),
             "firing_count": len(firing),
+            "alerts": [
+                {"alertname": a.get("labels", {}).get("alertname"), "severity": a.get("labels", {}).get("severity"),
+                 "state": a.get("status", {}).get("state"), "summary": a.get("annotations", {}).get("summary", ""),
+                 "since": a.get("startsAt")}
+                for a in alerts[:10]
+            ],
             "real": True,
         })
+
+
+def _summarize_targets(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {"job": t.get("labels", {}).get("job"), "instance": t.get("labels", {}).get("instance"),
+         "health": t.get("health"), "last_error": (t.get("lastError") or "")[:200] or None}
+        for t in payload.get("data", {}).get("activeTargets", [])
+    ]
+
+
+class RealPrometheusTargets(Tool):
+    name = "prometheus.targets"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get("http://prometheus:9090/api/v1/targets")
+        except httpx.HTTPError as exc:
+            return ToolResult(ok=False, error=str(exc)[:500])
+        if resp.status_code >= 400:
+            return ToolResult(ok=False, error=f"Prometheus returned {resp.status_code}: {resp.text[:200]}")
+        targets = _summarize_targets(resp.json())
+        return ToolResult(ok=True, data={
+            "targets": targets, "count": len(targets), "up": sum(1 for t in targets if t["health"] == "up"), "real": True,
+        })
+
+
+class RealRegistryList(Tool):
+    name = "registry.list"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                cat = await client.get("http://registry:5000/v2/_catalog")
+                cat.raise_for_status()
+                images = {}
+                for repo in cat.json().get("repositories", [])[:50]:
+                    tags = await client.get(f"http://registry:5000/v2/{repo}/tags/list")
+                    images[repo] = (tags.json().get("tags") or []) if tags.status_code < 400 else []
+        except httpx.HTTPError as exc:
+            return ToolResult(ok=False, error=str(exc)[:500])
+        return ToolResult(ok=True, data={"registry": "registry:5000", "images": images, "count": len(images), "real": True})
+
+
+class RealPagerdutyList(Tool):
+    name = "pagerduty.list"
+
+    async def run(self, **kwargs: Any) -> ToolResult:
+        if not settings.pagerduty_api_token:
+            return ToolResult(ok=False, error="PAGERDUTY_API_TOKEN not configured")
+        statuses = kwargs.get("statuses") or ["triggered", "acknowledged"]
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{settings.pagerduty_api_url}/incidents", params=[("statuses[]", s) for s in statuses],
+                    headers={"Authorization": f"Token token={settings.pagerduty_api_token}", "Accept": "application/vnd.pagerduty+json;version=2"},
+                )
+        except httpx.HTTPError as exc:
+            return ToolResult(ok=False, error=str(exc)[:500])
+        if resp.status_code >= 400:
+            return ToolResult(ok=False, error=f"PagerDuty returned {resp.status_code}: {resp.text[:200]}")
+        incidents = [
+            {"id": i.get("id"), "status": i.get("status"), "title": i.get("title"), "urgency": i.get("urgency")}
+            for i in resp.json().get("incidents", [])[:25]
+        ]
+        return ToolResult(ok=True, data={"statuses": statuses, "incidents": incidents, "count": len(incidents), "real": True})
 
 
 REAL_TOOLS: dict[str, Tool] = {
     tool.name: tool
     for tool in (
         RealKubectlGet(), RealKubectlLogs(), RealKubectlRestart(), RealKubectlScale(),
+        RealKubectlEvents(), RealKubectlDescribe(), RealPrometheusTargets(), RealRegistryList(), RealPagerdutyList(),
         RealTerraformPlan(), RealTerraformApply(), RealTrivyScan(),
         RealDockerBuild(), RealDockerTag(),
         RealHelmUpgrade(), RealHelmRollback(),

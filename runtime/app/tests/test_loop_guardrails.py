@@ -59,3 +59,43 @@ def test_repeated_tool_hits_the_cap_then_gets_a_tool_less_final_answer(monkeypat
     assert out["summary"] == "FINAL ANSWER"
     assert len(calls) == executor.MAX_CALLS_PER_TOOL  # stopped looping instead of burning all 8 rounds
     assert "tools" not in requests[-1]
+
+
+def test_model_failure_after_tools_ran_keeps_the_real_results(monkeypatch):
+    n = {"calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        n["calls"] += 1
+        if n["calls"] == 1:
+            call = {"id": "c1", "type": "function", "function": {"name": "git.log", "arguments": "{}"}}
+            return httpx.Response(200, json={"choices": [{"message": {"content": "", "tool_calls": [call]}}]})
+        raise httpx.ReadTimeout("model too slow", request=request)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(executor.httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    agent = {"system_prompt": "s", "tools": ["git.log"]}
+    out, _, calls, _, _, _ = asyncio.run(executor._run_with_local_llm(agent, {}, ["git.log"], None))
+    assert len(calls) == 1
+    assert "ReadTimeout" in out["summary"] and "git.log" in out["summary"]
+
+
+def test_model_failure_before_any_tool_still_raises_for_the_simulated_fallback(monkeypatch):
+    import pytest
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down", request=request)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(executor.httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(httpx.ConnectError):
+        asyncio.run(executor._run_with_local_llm({"system_prompt": "s", "tools": []}, {}, [], None))
+
+
+def test_length_finish_reason_is_flagged_as_cut_off(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"finish_reason": "length", "message": {"content": "Here are all 13 pods, with two of "}}]})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(executor.httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    out, *_ = asyncio.run(executor._run_with_local_llm({"system_prompt": "s", "tools": []}, {}, [], None))
+    assert out["summary"].startswith("Here are all 13 pods") and "cut off" in out["summary"]
