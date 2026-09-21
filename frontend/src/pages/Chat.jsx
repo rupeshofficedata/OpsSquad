@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, runStreamUrl } from "../api/client.js";
 import { useAuth } from "../auth/AuthContext.jsx";
 import CommandApprovalBox from "../components/CommandApprovalBox.jsx";
@@ -73,8 +73,35 @@ function LiveSteps({ steps }) {
   );
 }
 
+// The reasoning/tool-call trace (LiveSteps) is collapsed behind this by
+// default — the point of the redesign is that the polished final answer is
+// what's visible, not the round-by-round trace. Closed by default even
+// while a run is still going: `running` here only swaps the label/dot so
+// there's still a liveness cue without dumping the trace open on every
+// message.
+function StepsDisclosure({ steps, running }) {
+  const [open, setOpen] = useState(false);
+  const rounds = steps.filter((s) => s.reasoning || s.tool_calls?.length > 0);
+  if (rounds.length === 0) return null;
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300"
+      >
+        <span className="w-3 text-center">{open ? "▾" : "▸"}</span>
+        <span>{open ? "Hide" : "Show"} steps ({rounds.length})</span>
+        {running && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />}
+      </button>
+      {open && <div className="mt-1.5"><LiveSteps steps={steps} /></div>}
+    </div>
+  );
+}
+
 export default function Chat() {
   const { user, updateUser } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [prompt, setPrompt] = useState("");
   const [env, setEnv] = useState("staging");
   const [history, setHistory] = useState([]);
@@ -86,6 +113,59 @@ export default function Chat() {
   const [modelStatus, setModelStatus] = useState(null);
   const [starting, setStarting] = useState(false);
   const [answeredIndices, setAnsweredIndices] = useState(new Set());
+  // The root run's id of the thread this page is continuing, or null for
+  // a not-yet-started one — see routes/chat.py's build_thread_history.
+  // Kept in the URL (?thread=) so a reload resumes the same thread instead
+  // of losing it (see Chat.jsx's ?thread hydration effect below).
+  const [threadId, setThreadId] = useState(searchParams.get("thread"));
+  const [threadLoading, setThreadLoading] = useState(!!searchParams.get("thread"));
+  // handleSubmit sets ?thread= itself right after a send, once it already
+  // has the live run's state in `history`/`runsById` — that URL change
+  // would otherwise re-trigger the hydration effect below and stomp that
+  // live state with a DB fetch that doesn't have the in-flight run's
+  // answer yet (chat_messages only gets the agent's turn once it finishes
+  // — see _execute_chat). This flag tells that one self-inflicted URL
+  // change to skip hydrating, without blocking a genuine reload or a
+  // Dashboard "Continue" navigation (both come from outside handleSubmit).
+  const skipNextHydration = useRef(false);
+
+  // Hydrates from an existing thread — either a reload with ?thread= still
+  // in the URL, or Dashboard's "Continue" link. Only runs once per
+  // thread_id: every message here is real (see get_thread's docstring —
+  // add_chat_message is never called with a simulated run's output), so
+  // it's rendered as plain read-only turns, no LiveSteps/tool-call replay
+  // (that raw state was never persisted across runs in the first place).
+  useEffect(() => {
+    const id = searchParams.get("thread");
+    if (!id) return;
+    if (skipNextHydration.current) { skipNextHydration.current = false; return; }
+    let cancelled = false;
+    setThreadLoading(true);
+    api.getChatThread(id)
+      .then((res) => {
+        if (cancelled) return;
+        setThreadId(res.thread_id);
+        setHistory(res.messages.map((m) => ({
+          role: m.role === "agent" ? "agent-historical" : "user",
+          text: m.content,
+        })));
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setHistory([{ role: "error", text: `Couldn't load thread: ${err.message}` }]);
+      })
+      .finally(() => { if (!cancelled) setThreadLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams.get("thread")]);
+
+  function handleNewChat() {
+    setThreadId(null);
+    setHistory([]);
+    setRunsById({});
+    setAnsweredIndices(new Set());
+    setSearchParams((p) => { p.delete("thread"); return p; });
+  }
 
   useEffect(() => {
     if (user.model_provider !== "local") return;
@@ -163,7 +243,12 @@ export default function Chat() {
     setHistory((h) => [...h, mine]);
     setPrompt("");
     try {
-      const res = await api.chat(mine.text, env);
+      const res = await api.chat(mine.text, env, threadId);
+      if (res.thread_id && res.thread_id !== threadId) {
+        skipNextHydration.current = true;
+        setThreadId(res.thread_id);
+        setSearchParams((p) => { p.set("thread", res.thread_id); return p; });
+      }
       setHistory((h) => [...h, { role: "agent", runId: res.run_id, agent: res.agent }]);
       if (res.status === "queued") {
         subscribeToRun(res.run_id);
@@ -212,7 +297,18 @@ export default function Chat() {
   return (
     <div className="flex h-full flex-col space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Chat</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold">Chat</h1>
+          {threadId && (
+            <button
+              onClick={handleNewChat}
+              title="Start a new thread — this one stays reachable from Run History"
+              className="rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:bg-slate-800"
+            >
+              New chat
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <select
             value={user.model_provider}
@@ -273,7 +369,8 @@ export default function Chat() {
       </p>
 
       <div className="flex-1 space-y-3 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-        {history.length === 0 && (
+        {threadLoading && <p className="text-slate-500">Loading thread…</p>}
+        {!threadLoading && history.length === 0 && (
           <p className="text-slate-500">
             Try: "scan the payments-api image for critical CVEs" or "what's the current cluster cost?"
           </p>
@@ -282,6 +379,13 @@ export default function Chat() {
           <div key={i} className="space-y-1">
             {m.role === "user" && <p className="font-medium text-indigo-300">You: {m.text}</p>}
             {m.role === "error" && <p className="text-red-400">Error: {m.text}</p>}
+            {/* A prior turn hydrated from GET /chat/threads/{id} — plain text
+                only, no run/steps to replay (see the hydration effect above). */}
+            {m.role === "agent-historical" && (
+              <div className="rounded-md bg-slate-800 p-3 text-sm">
+                <FormattedText text={m.text} />
+              </div>
+            )}
             {m.role === "agent" && (() => {
               const data = runsById[m.runId];
               const status = data?.run?.status;
@@ -292,14 +396,18 @@ export default function Chat() {
               const summary = lastStep?.output?.summary;
               const question = lastStep?.output?.question;
               const pendingCommand = lastStep?.output?.pending_command;
-              // LiveSteps already renders every round's own text, including
-              // the last one — this final marker step's output.summary is
-              // always that same last round's text verbatim (see
-              // _execute_chat in routes/chat.py). Re-rendering it below
-              // duplicated the answer 2-3x. Only show it here when there
-              // were no rounds to begin with (the simulated-mode fallback,
-              // which never calls on_step at all — see _run_simulated).
-              const hasRounds = steps.some((s) => s.reasoning || s.tool_calls?.length > 0);
+              // No model actually ran this turn (no Anthropic key, no
+              // reachable local server — see run_agent's `simulated` flag
+              // in executor.py). summary below is a canned placeholder,
+              // not a real answer, and was never saved into thread memory.
+              const isSimulated = lastStep?.output?.simulated === true;
+              // summary only exists on the final marker run_step (added
+              // once _execute_chat's round loop finishes — see
+              // routes/chat.py), so it's naturally absent while `status`
+              // is still 'running'. The per-round trace itself lives only
+              // inside the collapsed StepsDisclosure below, never inline,
+              // so there's nothing to de-duplicate here anymore.
+              const roundCount = steps.filter((s) => s.reasoning || s.tool_calls?.length > 0).length;
 
               return (
                 <div className="rounded-md bg-slate-800 p-3 text-sm">
@@ -315,15 +423,25 @@ export default function Chat() {
                     <p className="text-amber-400">This is a mutating action in prod — awaiting admin approval.</p>
                   ) : (
                     <>
-                      {steps.length > 0 && <LiveSteps steps={steps} />}
-                      <div className="mt-2 space-y-2">
+                      {isSimulated && (
+                        <p className="mb-2 text-xs text-amber-500">
+                          ⚠ No model configured (no Anthropic key, no reachable local server) — this is a canned placeholder, not a real answer, and won't be remembered in this thread.
+                        </p>
+                      )}
+                      <div className="space-y-2">
                         {items.length > 0 && <ResourceCards items={items} />}
-                        {!hasRounds && (typeof summary === "string" && summary.trim() ? (
+                        {typeof summary === "string" && summary.trim() ? (
                           <FormattedText text={summary} />
+                        ) : status === "running" ? (
+                          <p className="text-slate-500">
+                            <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+                            Working… ({roundCount} round{roundCount === 1 ? "" : "s"} so far)
+                          </p>
                         ) : (
                           !items.length && lastStep?.output && <KeyValueCards data={lastStep.output} />
-                        ))}
+                        )}
                       </div>
+                      <StepsDisclosure steps={steps} running={status === "running"} />
                       {status === "awaiting_user_input" && !answeredIndices.has(i) && (
                         <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-950/20 p-2">
                           <p className="text-sm text-amber-400">❓ {question}</p>

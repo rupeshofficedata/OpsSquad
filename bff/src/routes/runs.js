@@ -12,7 +12,7 @@ export const router = Router();
 router.get("/", requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT r.id, r.kind, r.status, r.prompt, r.started_at, r.finished_at,
-            a.slug AS agent_slug, f.slug AS flightplan_slug
+            r.thread_id, a.slug AS agent_slug, f.slug AS flightplan_slug
      FROM runs r
      LEFT JOIN agents a ON a.id = r.agent_id
      LEFT JOIN flightplans f ON f.id = r.flightplan_id

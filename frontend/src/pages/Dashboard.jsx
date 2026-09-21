@@ -43,6 +43,18 @@ export default function Dashboard() {
                   <Link to={`/runs/${r.id}`} className="text-indigo-400 hover:underline">
                     {r.kind}
                   </Link>
+                  {r.kind === "chat" && (
+                    <>
+                      {" · "}
+                      <Link
+                        to={`/chat?thread=${r.thread_id || r.id}`}
+                        className="text-emerald-400 hover:underline"
+                        title="Reopen Chat with this thread's full memory"
+                      >
+                        continue
+                      </Link>
+                    </>
+                  )}
                 </td>
                 <td className="px-4 py-2">{r.agent_slug || r.flightplan_slug || "—"}</td>
                 <td className="max-w-xs truncate px-4 py-2 text-slate-300" title={r.prompt || ""}>{r.prompt || "—"}</td>

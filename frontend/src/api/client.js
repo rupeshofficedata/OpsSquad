@@ -32,8 +32,9 @@ export const api = {
   getModelStatus: () => request("/api/model/status"),
   startModel: () => request("/api/model/start", { method: "POST" }),
   listAgents: () => request("/api/agents"),
-  chat: (prompt, env = "staging") =>
-    request("/api/chat", { method: "POST", body: JSON.stringify({ prompt, env }) }),
+  chat: (prompt, env = "staging", threadId = null) =>
+    request("/api/chat", { method: "POST", body: JSON.stringify({ prompt, env, thread_id: threadId }) }),
+  getChatThread: (threadId) => request(`/api/chat/threads/${threadId}`),
   replyToChat: (runId, reply) =>
     request(`/api/chat/${runId}/reply`, { method: "POST", body: JSON.stringify({ reply }) }),
   approveCommand: (runId) => request(`/api/chat/${runId}/approve-command`, { method: "POST" }),

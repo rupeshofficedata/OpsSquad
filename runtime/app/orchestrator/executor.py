@@ -114,6 +114,53 @@ async def summarize_run(steps: dict[str, Any], model_provider: str, model_name: 
     return None
 
 
+THREAD_SUMMARY_SYSTEM_PROMPT = (
+    "You compress an in-progress chat conversation between an operator and a DevOps "
+    "assistant into a short memory note for yourself to keep reading. Preserve concrete "
+    "facts, decisions, and anything left unresolved a later reply would need. Drop small "
+    "talk and restating tool output already acted on. Plain prose, under 200 words."
+)
+
+
+async def summarize_thread(turns: list[dict[str, str]], model_provider: str, model_name: str | None) -> str | None:
+    """Same one-shot-completion, best-effort-None-on-failure shape as
+    summarize_run above, but compressing older turns of a chat thread (see
+    build_thread_history in routes/chat.py) instead of a Flightplan run's
+    step JSON. `turns`: [{"role": "user"|"agent", "content": str}, ...]."""
+    transcript = "\n".join(f"{t['role']}: {t['content']}" for t in turns)
+    prompt = f"Conversation so far:\n{transcript[:8000]}"
+    try:
+        if model_provider == "local":
+            async with httpx.AsyncClient(timeout=LOCAL_LLM_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{settings.local_llm_base_url}/chat/completions",
+                    json={
+                        "model": model_name or "local-model",
+                        "messages": [
+                            {"role": "system", "content": THREAD_SUMMARY_SYSTEM_PROMPT},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"].get("content") or None
+        elif model_provider == "anthropic" and settings.anthropic_api_key:
+            import anthropic
+
+            client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+            response = await client.messages.create(
+                model=model_name or settings.agent_model,
+                max_tokens=400,
+                system=THREAD_SUMMARY_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text_blocks = [b.text for b in response.content if b.type == "text"]
+            return "\n".join(text_blocks) or None
+    except Exception:
+        return None
+    return None
+
+
 def build_resume_messages(model_provider: str, messages: list[dict[str, Any]], reply: str) -> list[dict[str, Any]]:
     """`messages` is the raw provider-format history returned by run_agent()
     when it paused on ask_user (its last entry is the assistant turn that
@@ -217,6 +264,14 @@ async def run_agent(
     asked_question: str | None = None
     pending_command: dict[str, Any] | None = None
     messages_out: list[dict[str, Any]] | None = None
+    # True whenever output/reasoning came from _run_simulated — no LLM
+    # actually ran, so output["summary"] (if the fallback even sets one) is
+    # a canned string like "Simulated run of 'x' completed.", not a real
+    # answer. Callers that persist a run's answer as conversation memory
+    # (routes/chat.py's build_thread_history) must check this and skip —
+    # feeding that fake text back to a model as if it were a prior real
+    # turn would corrupt everything downstream.
+    simulated = False
 
     if model_provider == "local":
         try:
@@ -232,6 +287,7 @@ async def run_agent(
             # way an unreachable server already does, not surface a raw 500.
             output, reasoning, tool_calls, status = await _run_simulated(agent, params, tool_names)
             reasoning = f"Local LLM at {settings.local_llm_base_url} failed ({exc}) — ran simulated instead. {reasoning}"
+            simulated = True
     elif model_provider == "anthropic" and settings.anthropic_api_key:
         output, reasoning, tool_calls, asked_question, pending_command, messages_out = await _run_with_claude(
             agent, params, tool_names, model_name, allow_ask_user, history, on_step, user_role, pre_approved,
@@ -239,6 +295,7 @@ async def run_agent(
         status = "success"  # Claude reasons freely over the tools; we don't parse its text for pass/fail
     else:
         output, reasoning, tool_calls, status = await _run_simulated(agent, params, tool_names)
+        simulated = True
 
     if pending_command:
         status = "awaiting_command_approval"
@@ -255,6 +312,7 @@ async def run_agent(
         "asked_question": asked_question,
         "pending_command": pending_command,
         "messages": messages_out,
+        "simulated": simulated,
     }
 
 

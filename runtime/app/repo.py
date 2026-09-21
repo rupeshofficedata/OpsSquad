@@ -59,15 +59,16 @@ async def create_run(
     flightplan_id: str | None = None,
     prompt: str | None = None,
     inputs: dict[str, Any] | None = None,
+    thread_id: str | None = None,
 ) -> str:
     pool = get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO runs (kind, agent_id, flightplan_id, prompt, inputs, triggered_by)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO runs (kind, agent_id, flightplan_id, prompt, inputs, triggered_by, thread_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
         """,
-        kind, agent_id, flightplan_id, prompt, inputs, triggered_by,
+        kind, agent_id, flightplan_id, prompt, inputs, triggered_by, thread_id,
     )
     return str(row["id"])
 
@@ -199,6 +200,45 @@ async def list_chat_messages(run_id: str) -> list[dict[str, Any]]:
         "SELECT * FROM chat_messages WHERE run_id = $1 ORDER BY created_at", run_id,
     )
     return [dict(r) for r in rows]
+
+
+async def get_thread_root(thread_root_id: str) -> dict[str, Any] | None:
+    """The root run of a thread — its own id is the thread's key (see the
+    `thread_id` column comment in db/migrations/001_init.sql). Callers use
+    this to check ownership (triggered_by) before trusting a client-supplied
+    thread_id."""
+    return await get_run(thread_root_id)
+
+
+async def count_thread_runs(thread_root_id: str) -> int:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT COUNT(*) AS n FROM runs WHERE id = $1 OR thread_id = $1", thread_root_id,
+    )
+    return int(row["n"])
+
+
+async def list_thread_messages(thread_root_id: str) -> list[dict[str, Any]]:
+    """Every chat_messages row across every run in this thread, in the
+    order they actually happened — the raw turns build_thread_history()
+    (routes/chat.py) folds into the next run's seed history."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT cm.role, cm.content, cm.run_id, cm.created_at
+        FROM chat_messages cm
+        JOIN runs r ON r.id = cm.run_id
+        WHERE r.id = $1 OR r.thread_id = $1
+        ORDER BY r.started_at, cm.created_at
+        """,
+        thread_root_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def set_thread_summary(thread_root_id: str, summary: str) -> None:
+    pool = get_pool()
+    await pool.execute("UPDATE runs SET thread_summary = $2 WHERE id = $1", thread_root_id, summary)
 
 
 async def count_run_steps(run_id: str) -> int:

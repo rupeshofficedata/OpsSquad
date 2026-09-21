@@ -79,7 +79,15 @@ CREATE TABLE runs (
     triggered_by  UUID REFERENCES users(id),
     started_at    TIMESTAMPTZ DEFAULT NOW(),
     finished_at   TIMESTAMPTZ,
-    result        JSONB
+    result        JSONB,
+    -- Chat memory across separate runs. NULL = this run is itself a
+    -- thread's root (its own id is the thread key); otherwise the root
+    -- run's id. thread_summary is only ever read/written on the root row
+    -- — a rolling compression of turns once the thread outgrows the
+    -- most-recent-N window kept raw (see build_thread_history in
+    -- routes/chat.py).
+    thread_id      UUID REFERENCES runs(id),
+    thread_summary TEXT
 );
 
 -- ============================================
@@ -128,5 +136,6 @@ CREATE TABLE audit_logs (
 );
 
 CREATE INDEX idx_runs_status  ON runs(status);
+CREATE INDEX idx_runs_thread  ON runs(thread_id);
 CREATE INDEX idx_steps_run    ON run_steps(run_id, step_order);
 CREATE INDEX idx_audit_user   ON audit_logs(user_id, created_at DESC);
