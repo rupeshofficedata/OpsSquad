@@ -184,9 +184,12 @@ class RealKubectlGet(Tool):
             # testing that name+status alone wasn't actually what "list
             # pods" means to a user comparing it against the real CLI.
             items = [_summarize_k8s_item(i) for i in obj.get("items", [])]
-            return ToolResult(ok=True, data={"target": target, "items": items, "count": len(items), "real": True})
+            return ToolResult(ok=True, data={
+                "namespace": settings.kube_namespace, "target": target, "items": items, "count": len(items), "real": True,
+            })
 
         return ToolResult(ok=True, data={
+            "namespace": settings.kube_namespace,
             "replicas_desired": obj.get("spec", {}).get("replicas", 0),
             "replicas_ready": obj.get("status", {}).get("readyReplicas", 0),
             "target": target, "real": True,
@@ -210,6 +213,7 @@ class RealKubectlLogs(Tool):
         lines = out.splitlines()
         error_count = sum(1 for line in lines if "error" in line.lower())
         return ToolResult(ok=True, data={
+            "namespace": settings.kube_namespace,
             "lines_returned": len(lines), "error_count": error_count, "target": target, "real": True,
         })
 
@@ -225,8 +229,11 @@ class RealKubectlRestart(Tool):
         code, _, err = await _run(
             "kubectl", "rollout", "restart", "-n", settings.kube_namespace, "--", target
         )
-        return ToolResult(ok=code == 0, data={"target": target, "real": True} if code == 0 else None,
-                           error=None if code == 0 else err[:500])
+        return ToolResult(
+            ok=code == 0,
+            data={"namespace": settings.kube_namespace, "target": target, "real": True} if code == 0 else None,
+            error=None if code == 0 else err[:500],
+        )
 
 
 class RealKubectlScale(Tool):
@@ -241,8 +248,11 @@ class RealKubectlScale(Tool):
         code, _, err = await _run(
             "kubectl", "scale", "-n", settings.kube_namespace, f"--replicas={replicas}", "--", target
         )
-        return ToolResult(ok=code == 0, data={"target": target, "replicas": replicas, "real": True} if code == 0 else None,
-                           error=None if code == 0 else err[:500])
+        return ToolResult(
+            ok=code == 0,
+            data={"namespace": settings.kube_namespace, "target": target, "replicas": replicas, "real": True} if code == 0 else None,
+            error=None if code == 0 else err[:500],
+        )
 
 
 _PLAN_RE = re.compile(r"Plan:\s*(\d+)\s*to add,\s*(\d+)\s*to change,\s*(\d+)\s*to destroy")
@@ -256,6 +266,7 @@ class RealTerraformPlan(Tool):
         match = _PLAN_RE.search(out)
         to_add, to_change, to_destroy = (int(x) for x in match.groups()) if match else (0, 0, 0)
         return ToolResult(ok=code == 0, data={
+            "dir": settings.terraform_dir,
             "to_add": to_add, "to_change": to_change, "to_destroy": to_destroy, "real": True,
         } if code == 0 else None, error=None if code == 0 else err[:500])
 
@@ -268,7 +279,10 @@ class RealTerraformApply(Tool):
             "terraform", f"-chdir={settings.terraform_dir}", "apply", "-auto-approve", "-no-color",
             timeout=120.0,
         )
-        return ToolResult(ok=code == 0, data={"real": True} if code == 0 else None, error=None if code == 0 else err[:500])
+        return ToolResult(
+            ok=code == 0, data={"dir": settings.terraform_dir, "real": True} if code == 0 else None,
+            error=None if code == 0 else err[:500],
+        )
 
 
 _SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
@@ -358,8 +372,11 @@ class RealHelmUpgrade(Tool):
             "helm", "upgrade", "--install", "canary", "charts/canary",
             "-n", settings.kube_namespace, "--set", f"image.tag={tag}", timeout=120.0,
         )
-        return ToolResult(ok=code == 0, data={"release": "canary", "tag": tag, "real": True} if code == 0 else None,
-                           error=None if code == 0 else err[:500])
+        return ToolResult(
+            ok=code == 0,
+            data={"namespace": settings.kube_namespace, "release": "canary", "tag": tag, "real": True} if code == 0 else None,
+            error=None if code == 0 else err[:500],
+        )
 
 
 class RealHelmRollback(Tool):
@@ -367,8 +384,11 @@ class RealHelmRollback(Tool):
 
     async def run(self, **kwargs: Any) -> ToolResult:
         code, _, err = await _run("helm", "rollback", "canary", "-n", settings.kube_namespace, timeout=60.0)
-        return ToolResult(ok=code == 0, data={"release": "canary", "real": True} if code == 0 else None,
-                           error=None if code == 0 else err[:500])
+        return ToolResult(
+            ok=code == 0,
+            data={"namespace": settings.kube_namespace, "release": "canary", "real": True} if code == 0 else None,
+            error=None if code == 0 else err[:500],
+        )
 
 
 _ARGOCD_APP = ("application", "argocd-demo", "-n", "argocd")
