@@ -36,6 +36,16 @@ ORIGINAL_CTX="$(kubectl config current-context 2>/dev/null || true)"
 
 if kind get clusters | grep -qx "$CLUSTER_NAME"; then
   log "kind cluster '$CLUSTER_NAME' already exists — reusing it"
+  # `kind get clusters` lists a cluster by its node containers' labels
+  # regardless of run state (see k8s/shutdown.sh) — start any stopped ones
+  # and wait for the apiserver to answer before anything below touches it.
+  stopped_nodes=$(docker ps -a -q -f "label=io.x-k8s.kind.cluster=$CLUSTER_NAME" -f status=exited)
+  if [ -n "$stopped_nodes" ]; then
+    log "Node container(s) were stopped (k8s/shutdown.sh) — starting them back up"
+    docker start $stopped_nodes >/dev/null
+    for _ in $(seq 1 60); do k cluster-info >/dev/null 2>&1 && break; sleep 2; done
+    k cluster-info >/dev/null 2>&1 || { log "apiserver never came back up"; exit 1; }
+  fi
 else
   log "Creating kind cluster '$CLUSTER_NAME'"
   kind create cluster --name "$CLUSTER_NAME"
