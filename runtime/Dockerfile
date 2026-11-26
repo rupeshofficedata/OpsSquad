@@ -2,6 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Baked in by k8s/bootstrap.sh (--build-arg GIT_SHA=$(git rev-parse --short HEAD))
+# so /version can report exactly what commit this image was built from —
+# compare it against bff/frontend's own to spot a half-deployed rollout.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
+
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates buildah netavark git && \
     # kubectl — real tool target: this pod's own ServiceAccount in the opssquad namespace
     curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl" && \

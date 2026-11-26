@@ -2,6 +2,10 @@ FROM node:22-slim
 
 WORKDIR /app
 
+# See runtime/Dockerfile for why.
+ARG GIT_SHA=unknown
+ENV VITE_GIT_SHA=$GIT_SHA
+
 COPY package.json .
 RUN npm install
 

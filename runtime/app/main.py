@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 import asyncio
+import os
 
 from app.config import INSECURE_DEFAULT_JWT_SECRET, check_approval_mode, settings
 from app.db import close_pool, init_pool
